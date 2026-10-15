@@ -1,0 +1,10 @@
+[project]
+name = "inflation-rates-markets-dashboard"
+version = "1.0.0"
+description = "MIS20080 group project: a 4-panel economics/finance dashboard in Python"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning:yfinance.*"]
