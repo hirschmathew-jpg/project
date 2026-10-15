@@ -3,7 +3,7 @@
 **Question:** *What is the bond market signalling about recessions?*
 **Code:** `dashboard/panels/yield_curve.py` · **Tests:** `tests/test_yield_curve.py` · **Data:** `data/yield_curve_treasury.csv`
 
-The panel links Panel 1 (what the Fed did with rates) to Panels 3-4 (what markets did). It shows the US Treasury yield curve and the gap between long-term and short-term rates. When short-term rates rise above long-term rates, the curve is **inverted**. Bond investors are then expecting rate cuts, usually because they expect the economy to weaken. Most US recessions since 1990 were preceded by an inversion. The panel measures how long each inversion came before a recession, and states honestly when no recession has followed (yet).
+The panel links Panel 1 (what the Fed did with rates) to Panels 3-4 (what markets did). It shows the US Treasury yield curve and the gap between long-term and short-term rates. When short-term rates rise above long-term rates, the curve is **inverted**. Bond investors are then expecting rate cuts, usually because they expect the economy to weaken. Most US recessions since 1990 were preceded by an inversion. The panel checks every inversion: was it followed by a recession within a time limit (30 months by default)? If so, how many months later? If not, it was a false alarm. If the time limit hasn't passed yet, it is too soon to judge.
 
 ## Data
 
@@ -22,8 +22,15 @@ The panel links Panel 1 (what the Fed did with rates) to Panels 3-4 (what market
   2. Consecutive inverted days form a *run*.
   3. Runs separated by at most `MAX_GAP_DAYS` = 63 trading days (about 3 months) are merged, because a short bounce above zero does not end the signal.
   4. An episode is kept only if it has at least `min_days` inverted days (default 10), so one-day blips are ignored.
-- **Lead time:** whole calendar months from an episode's first inverted day to the first month of the next recession: `(year2 − year1) × 12 + (month2 − month1)`. If no recession has started since, the lead time is `None`. The text then says "not yet" or "has not been followed by a recession so far", instead of pretending a recession came.
-- **Date snapping:** a chosen date with no data (weekend, holiday) is replaced by the nearest **earlier** trading day, which is what an investor saw that day. The legend always shows the date actually used.
+- **Lead time** (`months_between`): the number of calendar months from the month of an episode's first inverted day to the month the next recession began: `(year2 − year1) × 12 + (month2 − month1)`. Only the month counts, not the day (e.g. 15 Mar → 1 Aug = 5, Mar → Aug), because recessions are dated by month. Only recessions that had begun by the last day of data count.
+- **Outcome of an episode** (`episode_outcome`), with a time limit of `max_lead` months (default `MAX_LEAD_DEFAULT` = 30, set with the "Recession within" slider):
+  - *followed by a recession*: the next recession began at most `max_lead` months after the inversion started (exactly `max_lead` still counts);
+  - *no recession* (a false alarm): more than `max_lead` months have passed with no recession starting. This includes a recession that came later than the limit. Example: the May 1998 inversion was followed by the April 2001 recession only 35 months later;
+  - *too soon to judge*: no recession yet, but `max_lead` months haven't passed.
+
+  Without a limit, any recession however many years later would count as a hit, and an inversion could never be called a false alarm.
+- **Each recession counts once** (`add_lead_times`, `summarise_lead_times`): sometimes two inversions come before the same recession, e.g. the 10Y − 3M in 2019 and again in January 2020, both before the COVID recession. Only the first is the "first warning". The average lead time uses first warnings only, so a late repeat doesn't pull the average down.
+- **Date snapping:** a chosen date with no data (weekend, holiday) is replaced by the nearest **earlier** trading day, which is what an investor saw that day. The legend always shows the date actually used. If two chosen moments land on the same trading day (e.g. a custom date of today and "Latest"), that curve is drawn once and a caption says so.
 - **Speed:** windows longer than 5 years are plotted weekly, using the last trading day of each week (`groupby` + `tail(1)`). Episodes are always computed from daily data.
 
 ## Controls
@@ -35,13 +42,16 @@ The panel links Panel 1 (what the Fed did with rates) to Panels 3-4 (what market
 | Compare the curve on | `yield_curve_moments` | Up to 4 moments: Latest, 1 year ago, Deepest inversion (the day the spread was lowest), Pre-COVID, Financial crisis, Dot-com peak. Each has a fixed colour. |
 | Add a custom date + Custom date | `yield_curve_use_custom`, `yield_curve_custom_date` | Adds a fifth curve for any date since 1990. |
 | Period | `yield_curve_period` | 1Y, 2Y, 5Y, 10Y, 20Y or All for the spread chart. |
-| Min. inversion (trading days) | `yield_curve_min_days` | Sensitivity analysis: how long an inversion must last to count (1-60). Changes the episode table, the insight and the "Avg. lead to recession" KPI. |
-| Recessions | `yield_curve_recessions` | Shows or hides the grey NBER recession bands. |
+| Shade recessions | `yield_curve_recessions` | Shows or hides the grey NBER recession bands. |
+| Min. days inverted | `yield_curve_min_days` | Sensitivity analysis: how long an inversion must last to count (1-60 trading days). |
+| Recession within (months) | `yield_curve_max_lead` | Sensitivity analysis: the time limit for "followed by a recession" (6-48 months). |
+
+The two sliders set the episode rule. They change the episode table, the insight and the "Avg. lead to recession" KPI in **both** views. The snapshot view uses the values last set in the history view. Every control keeps its value when you switch views (`_remember_control_values` saves them in `st.session_state`, because Streamlit forgets the value of a widget that isn't drawn).
 
 **KPIs:**
-1. The current spread, with its change versus a year earlier.
-2. The current 10Y yield, with its change in bp.
-3. The average lead time from inversion to recession, over the episodes that were followed by one. Hovering the "?" shows how many episodes that is.
+1. The current spread, with its change versus a year earlier (bp).
+2. The current 10Y yield, with its change versus a year earlier (bp).
+3. The average lead time to recession, counting each recession once from its first warning. Only recessions that began within the time limit count. Hovering the "?" shows how many recessions that is and how many inversions were false alarms.
 
 ## Code walkthrough
 
@@ -53,19 +63,24 @@ The panel links Panel 1 (what the Fed did with rates) to Panels 3-4 (what market
 | `find_inversion_runs` | NumPy `spread < 0`, then a `for` loop that records where each run starts and ends. |
 | `merge_close_runs` | Loop that joins a run to the previous one when the gap is ≤ `max_gap`. |
 | `find_inversion_episodes` | Applies the rule above; returns a **list of dicts** (start, end, inverted_days, deepest_bp, deepest_date, ongoing). |
-| `months_between`, `months_to_next_recession`, `add_lead_times`, `summarise_lead_times` | Lead-time arithmetic, plus count, mean, min and max with NumPy. |
-| `moment_dates` | Turns the chosen moment names into real trading days (if/elif chain). |
+| `months_between`, `next_recession_start` | Calendar-month arithmetic; a loop that finds the first recession after a date. |
+| `episode_outcome` | The time-limit rule as an if/else: followed, no recession (false alarm) or too soon. |
+| `add_lead_times` | Adds the next recession, lead time, outcome and "first warning" flag to every episode dict. It keeps a list of the recessions already warned about. |
+| `summarise_lead_times` | Counts the outcomes with a dict, plus the mean, min and max lead with NumPy (first warnings only). |
+| `moment_dates`, `drop_same_day_moments` | Turn the chosen moment names into real trading days (if/elif chain), then keep one moment per day. |
 | `last_n_years`, `to_weekly`, `recessions_in_window` | Window the data, thin it to weekly, and keep the recessions that overlap. |
-| `snapshot_insight`, `history_insight`, `episodes_markdown` | Build the insight sentences and the episode table from the data, with no hard-coded facts. |
-| `split_by_sign`, `build_snapshot_chart`, `build_spread_chart` | Plotly figures. `split_by_sign` makes the blue (normal) and red (inverted) areas meet at zero. A single y-axis only, with colours from `dashboard/theme.py`. |
-| `render` (+ `_render_snapshots`, `_render_history`, `_show_kpis`) | The only Streamlit code: controls → 3 KPIs → chart → insight → details. |
+| `snapshot_insight` (+ `comparison_sentence`, `inversion_outcome_clause`) | The snapshot insight: the first curve's shape, how it compares (handling ties and all-inverted curves), and whether a recession followed the most inverted curve shown. |
+| `history_insight` (= `current_state_sentence` + `track_record_sentence`) | The history insight: where the spread is now and what followed the last episode, then the track record since 1990 (recessions, average lead, false alarms). |
+| `outcome_text`, `lead_kpi_help`, `episodes_markdown`, `plural`, `was_or_were`, `list_months` | Small text helpers, so the wording is correct for 1 or many and never hard-codes facts. |
+| `split_by_sign`, `build_snapshot_chart`, `build_spread_chart`, `top_margin_for_legend` | Plotly figures. `split_by_sign` makes the blue (normal) and red (inverted) areas meet at zero. `top_margin_for_legend` leaves one legend row per two entries, so the legend never sits under Plotly's toolbar. A single y-axis only, with colours from `dashboard/theme.py`. |
+| `render` (+ `_remember_control_values`, `_render_snapshots`, `_render_history`, `_show_kpis`) | The only Streamlit code: controls → 3 KPIs → chart → insight → details. |
 
 ## Course concepts used
 
 | Session | Concept | Where it is used |
 |---|---|---|
-| S3 | Lists, dicts, tuples | `MATURITIES`, `SPREADS`, `PERIODS`, `MOMENT_COLOURS`; episodes are a list of dicts; runs are tuples. |
-| S4 | Loops and conditionals | Run detection, gap merging, the moment if/elif chain, insight wording. |
+| S3 | Lists, dicts, tuples | `MATURITIES`, `SPREADS`, `PERIODS`, `MOMENT_COLOURS`; episodes are a list of dicts; runs are tuples; outcome counts in a dict. |
+| S4 | Loops and conditionals | Run detection, gap merging, the outcome rule, the moment if/elif chain, insight wording. |
 | S5 | Functions | Docstrings, default and keyword arguments, small refactored helpers. |
 | S6 | NumPy, FRED, CSV snapshots | Boolean arrays, `.sum()`, `np.mean`; FRED data saved as CSV snapshots. |
 | S7 | pandas | DataFrames, `.loc`/`.iloc`, boolean filtering, `dropna`, `idxmin`. |
@@ -76,9 +91,10 @@ The panel links Panel 1 (what the Fed did with rates) to Panels 3-4 (what market
 ## Limitations
 
 - The data start in 1990. The 1989 inversion before the 1990 recession is therefore missed, and the March 1990 episode is a short re-inversion, so its 5-month lead understates that cycle.
-- Lead times are "to the *next* recession", however far away. The 1998 inversion counts with a 35-month lead, and the 1998 and 2000 inversions point to the same 2001 recession. Only a handful of episodes exist, so the average is a description, not a forecast.
-- `MAX_GAP_DAYS`, `FLAT_LIMIT_BP` and the default `min_days` are judgement calls. The slider shows how sensitive the results are to the minimum length.
-- NBER dates recessions months later, and USREC marks the month *after* the peak as the first recession month.
+- The 30-month time limit is a judgement call, and the result depends on it. With the defaults, the 10Y − 2Y record is 3 recessions (1990, 2001, 2008), an average lead of 15 months (range 5-25), and 2 false alarms (1998 and 2022). With a 36-month limit the 1998 inversion counts instead, as the first warning of the 2001 recession, and the average rises to 22 months. The "Recession within" slider shows this sensitivity.
+- The panel counts false alarms but not *missed* recessions. With the 10-day rule, the 10Y − 2Y did not invert before the 2020 COVID recession: the August 2019 dip lasted only 3 days. Only a handful of episodes exist, so the average is a description, not a forecast.
+- `MAX_GAP_DAYS`, `FLAT_LIMIT_BP` and the default `min_days` are judgement calls too. The "Min. days inverted" slider shows how sensitive the results are to the minimum length.
+- NBER dates recessions months later, and USREC marks the month *after* the peak as the first recession month. A recession that has started but not yet been announced is therefore not in the data, so a recent inversion can look "too soon to judge" or like a false alarm until the data catch up.
 
 ## Extension ideas
 

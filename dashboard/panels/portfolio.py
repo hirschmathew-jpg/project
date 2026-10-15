@@ -794,8 +794,9 @@ def _draw_controls(returns: pd.DataFrame) -> dict:
                      "Weights are rescaled to add up to 100%.",
             )
 
-    # Row 2: scenario, estimation window, horizon, starting amount
-    col_scenario, col_window, col_horizon, col_start = st.columns([1.2, 1.25, 1, 1])
+    # Row 2: scenario, estimation window, horizon, starting amount. The two drop-downs get the
+    # most room so "Stock market crash" and "Since Oct 2014" fit in a half-width panel.
+    col_scenario, col_window, col_horizon, col_start = st.columns([1.65, 1.35, 0.8, 0.8])
     with col_scenario:
         scenario = st.selectbox(
             "Scenario", list(SCENARIOS), index=list(SCENARIOS).index(DEFAULT_SCENARIO), key=KEY_SCENARIO,
@@ -811,12 +812,12 @@ def _draw_controls(returns: pd.DataFrame) -> dict:
                  "volatility and correlations.",
         )
     with col_horizon:
-        horizon = st.slider("Horizon (years)", min_value=1, max_value=MAX_HORIZON_YEARS,
+        horizon = st.slider("Years ahead", min_value=1, max_value=MAX_HORIZON_YEARS,
                             value=DEFAULT_HORIZON_YEARS, step=1, key=KEY_HORIZON)
     with col_start:
+        # Invested at the end of the last month with data (the fan chart starts there)
         start_amount = st.number_input("Invested ($)", min_value=1_000, max_value=MAX_START_AMOUNT,
-                                       value=DEFAULT_START_AMOUNT, step=1_000, key=KEY_START,
-                                       help="Starting amount, invested at the end of the last data month.")
+                                       value=DEFAULT_START_AMOUNT, step=1_000, key=KEY_START)
 
     # Row 3: which chart, how many simulations, new random draw. The view options are
     # stacked (not side by side) so they fit next to the other two controls in half a screen.
@@ -934,7 +935,9 @@ rebalances to the target weights every month:
 $$V_t = V_{{t-1}} \\times \\sum_i w_i \\, e^{{r_{{i,t}}}}$$
 
 One-off shocks multiply month 1 by $(1 + \\text{{shock}}_i)$. The KPIs are the median, the 5th percentile
-and the share of the {choices['n_sims']:,} final values below the starting amount.
+and the share of the {choices['n_sims']:,} final values below the starting amount. When the 5% best case
+is more than {LOG_SCALE_RATIO} times the 5% worst case, the fan chart and the outcome distribution use a
+log scale (each ×10 step takes the same space), because compounding makes outcomes very lopsided.
 
 | Asset | Avg. log return / yr | Volatility / yr | Scenario drift | Vol. × | Month-1 shock |
 |---|---|---|---|---|---|
@@ -977,7 +980,8 @@ def render() -> None:
         return
     period = f"{month_label(window_returns.index[0])} – {month_label(window_returns.index[-1])}"
 
-    _draw_assumption_caption(choices, weights, seed)
+    caution = high_return_caution(average_yearly_returns(window_returns), weights, period)
+    _draw_assumption_caption(choices, weights, seed, caution)
 
     # Model: estimate -> apply scenario -> simulate -> summarise
     scenario = SCENARIOS[choices["scenario"]]
@@ -996,18 +1000,19 @@ def render() -> None:
     _draw_kpis(stats, choices["start_value"], choices["years"])
 
     view = choices["view"]
-    if view == "Fan chart":
+    log_scale = use_log_scale(stats)  # very spread-out outcomes (e.g. lots of bitcoin) need a log scale
+    if view == VIEW_FAN:
         paths = percentile_paths(values)
         # Month 0 is the last month with data; each column after it is one month later
         paths.index = pd.date_range(window_returns.index[-1], periods=months + 1, freq="ME")
-        fig = build_fan_chart(paths, choices["start_value"])
+        fig = build_fan_chart(paths, choices["start_value"], log_scale)
         table = _paths_table(paths)
         file_name = f"{SLUG}_fan_chart.csv"
-    elif view == "Histogram":
-        bins = histogram_table(values[:, -1])
-        fig = build_histogram(bins, stats, choices["start_value"], choices["years"])
+    elif view == VIEW_OUTCOMES:
+        bins = histogram_table(values[:, -1], log_scale=log_scale)
+        fig = build_histogram(bins, stats, choices["start_value"], choices["years"], log_scale)
         table = _histogram_display_table(bins)
-        file_name = f"{SLUG}_histogram.csv"
+        file_name = f"{SLUG}_outcomes.csv"
     else:
         fig = build_correlation_heatmap(corr, period)
         table = _correlation_display_table(corr)

@@ -186,6 +186,20 @@ def test_tickers_missing_data_are_excluded():
     assert sectors.split_by_data_coverage(later) == ([BENCH, "XLK", "XLC"], [])
 
 
+def test_clean_prices_fills_gaps_but_not_before_launch():
+    prices = prices_from_returns({BENCH: [0.01] * 5, "XLK": [0.02] * 5, "XLC": [0.01] * 5})
+    prices.loc[prices.index[:2], "XLC"] = np.nan   # XLC only starts trading on day 3
+    prices.loc[prices.index[3], "XLK"] = np.nan    # one missing XLK price inside the data
+    prices.loc[prices.index[-1], BENCH] = np.nan   # last day downloaded before the S&P 500 closed
+    clean = sectors.clean_prices(prices)
+    assert list(clean.index) == list(prices.index[:-1])  # the half-finished last day is dropped
+    assert clean.loc[prices.index[3], "XLK"] == prices.loc[prices.index[2], "XLK"]  # previous close
+    assert clean["XLC"].isna().sum() == 2  # no price is invented before the launch
+    # One missing day doesn't knock XLK out of the period any more
+    assert sectors.split_by_data_coverage(clean) == ([BENCH, "XLK"], ["XLC"])
+    assert sectors.total_return(clean)["XLK"] == pytest.approx(1.02 ** 4 - 1)
+
+
 # ---------------------------------------------------------------------------
 # Ranking, relative mode, wording
 # ---------------------------------------------------------------------------
@@ -219,8 +233,18 @@ def test_format_value():
     assert sectors.format_value(-0.337, sectors.DRAWDOWN) == "-33.7%"
     assert sectors.format_value(0.041, sectors.TOTAL_RETURN, relative=True) == "+4.1 pp"
     assert sectors.format_value(0.8512, sectors.SHARPE) == "0.85"
+    assert sectors.format_value(-0.57, sectors.SHARPE) == "-0.57"
     assert sectors.format_value(0.25, sectors.BETA, relative=True) == "+0.25"
     assert sectors.format_value(np.nan, sectors.BETA) == "n/a"
+
+
+def test_every_measure_has_all_settings():
+    settings = set(sectors.METRICS[sectors.TOTAL_RETURN])
+    for metric, spec in sectors.METRICS.items():
+        assert set(spec) == settings, metric
+    # Only total return always shows a + sign
+    signed = [metric for metric, spec in sectors.METRICS.items() if spec["signed"]]
+    assert signed == [sectors.TOTAL_RETURN]
 
 
 def test_count_phrase():
@@ -252,8 +276,48 @@ def test_ranking_insight_for_risk_measures():
     assert "1 of the 2 sectors had lower volatility than the S&P 500 (15.0%)" in text
     betas = pd.Series({"XLP": 0.5, "XLK": 1.3})
     text = sectors.ranking_insight(sectors.BETA, betas, 1.0, "the year to date")
-    assert "Technology moved most with the market (beta 1.30)" in text
-    assert text.endswith("had a beta below 1, so moved less than the market.")
+    assert "Technology was the most sensitive to the market (beta 1.30)" in text
+    # Beta is about following the market, not about how much a sector swings
+    assert text.endswith("had a beta below 1, so were less sensitive to S&P 500 moves.")
+    assert "moved less" not in text
+
+
+def test_negative_beta_wording():
+    # Year to date 2026 in the snapshot: Energy had a beta of about -0.52
+    betas = pd.Series({"XLE": -0.52, "XLU": 0.10, "XLK": 1.80})
+    text = sectors.ranking_insight(sectors.BETA, betas, 1.0, "the year to date")
+    assert "Technology was the most sensitive to the market (beta 1.80)" in text
+    assert "Energy even tended to move against it (beta -0.52)" in text
+
+
+def test_negative_sharpe_ratios_are_not_called_best():
+    # Both sectors lose money. XLK swings a lot and loses MORE, yet its Sharpe
+    # ratio is closer to zero, because the loss is divided by a bigger volatility.
+    steady_losses = [-0.002, -0.004] * 10
+    big_swings = [0.03, -0.036] * 10
+    prices = prices_from_returns({"XLP": steady_losses, "XLK": big_swings})
+    total = sectors.total_return(prices)
+    assert total["XLK"] < total["XLP"] < 0
+    sharpe = sectors.sharpe_ratio(sectors.daily_returns(prices), 0.0)
+    ranked = sectors.rank_sectors(sharpe, sectors.SHARPE)
+    assert list(ranked.index) == ["XLK", "XLP"]  # the bigger loser ranks first
+
+    assert sectors.all_sharpe_ratios_negative(sectors.SHARPE, ranked)
+    assert sectors.kpi_labels(sectors.SHARPE, ranked) == ("Highest", "Lowest")
+    text = sectors.ranking_insight(sectors.SHARPE, ranked, -2.0, "the test period")
+    assert "all Sharpe ratios were negative: Technology was least negative" in text
+    assert "isn't a fair test: compare total returns instead" in text
+    assert "best return for its risk" not in text
+
+    # As soon as one ratio is positive, the normal wording comes back
+    mixed = pd.Series({"XLE": 0.4, "XLK": -0.5})
+    assert not sectors.all_sharpe_ratios_negative(sectors.SHARPE, mixed)
+    assert sectors.kpi_labels(sectors.SHARPE, mixed) == ("Best", "Worst")
+    assert "Energy had the best return for its risk (Sharpe 0.40)" in sectors.ranking_insight(
+        sectors.SHARPE, mixed, 0.1, "x")
+    # Negative total returns keep "Best"/"Worst": a smaller loss really is better
+    losses = pd.Series({"XLP": -0.06, "XLK": -0.07})
+    assert sectors.kpi_labels(sectors.TOTAL_RETURN, losses) == ("Best", "Worst")
 
 
 def test_growth_of_100_and_weekly_thinning():
@@ -280,6 +344,15 @@ def test_growth_insight_wording():
     assert "trailed the index by $60.00" in sectors.growth_insight(growth.rename(
         columns={BENCH: "XLE", "XLE": BENCH}), "XLE", -0.1)
     assert "never fell below an earlier high" in sectors.growth_insight(growth, "XLE", 0.0)
+
+
+def test_growth_insight_gap_matches_the_printed_amounts():
+    index = pd.bdate_range("2025-10-14", periods=2)
+    growth = pd.DataFrame({BENCH: [100.0, 117.466], "XLB": [100.0, 113.494]}, index=index)
+    text = sectors.growth_insight(growth, "XLB", -0.05)
+    assert "worth $113.49" in text and "against $117.47" in text
+    # 117.47 - 113.49 = 3.98 (subtracting before rounding would print 3.97)
+    assert "trailed the index by $3.98." in text
 
 
 def test_markdown_safe_escapes_dollars():
@@ -320,6 +393,8 @@ def test_value_axis_range_leaves_room_for_labels():
     assert sectors.value_axis_range([10.0, 30.0]) == pytest.approx([0.0, 36.0])
     assert sectors.value_axis_range([-20.0, 10.0]) == pytest.approx([-26.0, 16.0])
     assert sectors.value_axis_range([0.0, 0.0]) == [-1.0, 1.0]  # never a zero-width axis
+    # All negative (drawdowns): a little room right of 0 so the '0%' tick label shows
+    assert sectors.value_axis_range([-60.0, -20.0]) == pytest.approx([-72.0, 3.6])
 
 
 def test_end_labels_are_pushed_apart_when_close():
@@ -355,6 +430,7 @@ def test_growth_chart_emphasis_pattern():
     end_labels = [a.text for a in fig.layout.annotations]
     assert any(text.startswith("XLE $") for text in end_labels)
     assert any(text.startswith("SPY $") for text in end_labels)
+    assert fig.layout.legend.y < 0  # under the chart, clear of Plotly's toolbar
 
 
 def test_growth_chart_shades_overlapping_recessions_only():
@@ -409,6 +485,31 @@ def _no_data_app():
         sectors._cached_prices.clear()
 
 
+def _gappy_data_app():
+    """The panel drawn from prices with a few holes, like a download made during trading hours."""
+    import numpy as np
+    import pandas as pd
+
+    from dashboard.panels import sectors
+
+    original = sectors.load_data
+
+    def gappy_load(refresh=False):
+        prices = original().copy()
+        prices.loc[prices.index[-1], ["XLK", "XLE"]] = np.nan  # last day: not priced yet
+        prices.loc[pd.Timestamp("2022-06-15"), "SPY"] = np.nan  # one missing S&P 500 price
+        prices.loc[pd.Timestamp("2022-03-15"), "XLE"] = np.nan  # one missing Energy price
+        return prices
+
+    sectors.load_data = gappy_load
+    sectors._cached_prices.clear()
+    try:
+        sectors.render()
+    finally:
+        sectors.load_data = original
+        sectors._cached_prices.clear()
+
+
 def run_panel():
     at = AppTest.from_function(_panel_app, default_timeout=120)
     at.run()
@@ -419,6 +520,7 @@ def run_panel():
 def assert_clean(at):
     assert not at.exception, [e.value for e in at.exception]
     assert not at.error, [e.value for e in at.error]
+    assert not at.warning, [e.value for e in at.warning]  # e.g. Streamlit's session_state warnings
 
 
 def texts(elements) -> str:
@@ -505,6 +607,13 @@ def test_custom_dates_including_reversed_and_too_short():
     assert_clean(at)
     assert "30 Jun 2020" in texts(at.caption)
 
+    # Only the first date clicked so far (older Streamlit reruns here): ask for the second one
+    at.date_input(key="sectors_dates").set_value((datetime.date(2024, 3, 5),)).run()
+    assert_clean(at)
+    assert "Pick both a start and an end date" in texts(at.info)
+    assert "trading days" not in texts(at.info)
+    assert not at.metric
+
     # Only two trading days: a friendly message instead of a chart
     at.date_input(key="sectors_dates").set_value((datetime.date(2026, 10, 12), datetime.date(2026, 10, 14))).run()
     assert_clean(at)
@@ -520,6 +629,72 @@ def test_custom_dates_including_reversed_and_too_short():
     at.date_input(key="sectors_dates").set_value((datetime.date(2016, 1, 4), datetime.date(2017, 12, 29))).run()
     assert_clean(at)
     assert "Communication Services (XLC)" in texts(at.caption)
+
+
+def test_hidden_controls_keep_their_values():
+    at = run_panel()
+    at.toggle(key="sectors_relative").set_value(True).run()
+    at.selectbox(key="sectors_metric").set_value(sectors.SHARPE).run()
+    at.slider(key="sectors_risk_free").set_value(4.5).run()
+
+    # The Growth view hides the measure, the toggle and the slider
+    at.radio(key="sectors_view").set_value(sectors.GROWTH).run()
+    assert not at.toggle and not at.slider
+    at.selectbox(key="sectors_highlight").set_value("XLE").run()
+
+    # ... and they come back with the values the user chose, not the defaults
+    at.radio(key="sectors_view").set_value(sectors.RANKING).run()
+    assert_clean(at)
+    assert at.toggle(key="sectors_relative").value is True
+    assert at.selectbox(key="sectors_metric").value == sectors.SHARPE
+    assert at.slider(key="sectors_risk_free").value == 4.5
+    at.radio(key="sectors_view").set_value(sectors.GROWTH).run()
+    assert at.selectbox(key="sectors_highlight").value == "XLE"
+
+    # Custom dates survive a visit to another period
+    picked = (datetime.date(2019, 1, 2), datetime.date(2019, 12, 31))
+    at.selectbox(key="sectors_period").set_value(sectors.CUSTOM).run()
+    at.date_input(key="sectors_dates").set_value(picked).run()
+    at.selectbox(key="sectors_period").set_value("Last 3 years").run()
+    at.selectbox(key="sectors_period").set_value(sectors.CUSTOM).run()
+    assert_clean(at)
+    assert at.date_input(key="sectors_dates").value == picked
+
+
+def test_growth_view_key_numbers_show_total_return():
+    at = run_panel()
+    at.selectbox(key="sectors_metric").set_value(sectors.BETA).run()
+    at.radio(key="sectors_view").set_value(sectors.GROWTH).run()
+    assert_clean(at)
+    # The lines show what $100 became, so the key numbers show total return, whatever the measure
+    assert at.metric[0].label == "S&P 500 total return"
+    assert at.metric[1].label == "Best: Energy"
+    assert "sectors_metric" not in [box.key for box in at.selectbox]  # Measure is a Ranking option
+
+
+def test_negative_sharpe_ratios_in_the_financial_crisis():
+    at = run_panel()
+    at.selectbox(key="sectors_period").set_value("Global financial crisis (Oct 2007 – Mar 2009)").run()
+    at.selectbox(key="sectors_metric").set_value(sectors.SHARPE).run()
+    assert_clean(at)
+    assert at.metric[1].label == "Highest: Energy"  # not "Best": Energy lost 48%
+    assert at.metric[2].label.startswith("Lowest: ")
+    assert "all Sharpe ratios were negative" in texts(at.info)
+    assert "best return for its risk" not in texts(at.info)
+
+
+def test_missing_prices_dont_drop_a_sector():
+    at = AppTest.from_function(_gappy_data_app, default_timeout=120)
+    at.run()
+    assert_clean(at)
+    # 2022 has a missing S&P 500 and a missing Energy price: Energy still leads
+    assert at.metric[1].label == "Best: Energy"
+    assert "Not shown" not in texts(at.caption)
+    # The last day has no XLK or XLE price yet: both are still in the year to date
+    at.selectbox(key="sectors_period").set_value("Year to date").run()
+    assert_clean(at)
+    assert "Not shown" not in texts(at.caption)
+    assert len(at.metric) == 3
 
 
 def test_panel_without_data_shows_a_message():

@@ -579,6 +579,15 @@ def test_snapshot_chart_makes_room_for_more_legend_rows():
     assert five.layout.yaxis.tickformat == ".1f"  # 3.5%, 4.0%, ... the same decimals on every tick
 
 
+def test_spread_chart_makes_room_for_the_recession_legend_row():
+    spread = make_spread([10, -5, 20], start="2020-02-03")
+    recessions = [(pd.Timestamp("2020-02-01"), pd.Timestamp("2020-03-01"))]
+    with_bands = yc.build_spread_chart(spread, "10Y - 2Y", recessions, show_recessions=True)
+    without_bands = yc.build_spread_chart(spread, "10Y - 2Y", recessions, show_recessions=False)
+    assert with_bands.layout.margin.t == yc.top_margin_for_legend(3) == yc.TOP_MARGIN + yc.LEGEND_ROW_HEIGHT
+    assert without_bands.layout.margin.t == yc.top_margin_for_legend(2) == yc.TOP_MARGIN
+
+
 def test_recessions_in_window():
     recessions = [(pd.Timestamp("2001-04-01"), pd.Timestamp("2001-12-01")),
                   (pd.Timestamp("2008-01-01"), pd.Timestamp("2009-07-01"))]
@@ -715,9 +724,9 @@ def test_app_default_view(app, real_yields):
 
     assert app.metric[0].label == "10Y - 2Y spread"
     assert app.metric[0].value == f"{spread_now:+.0f} bp"
-    assert app.metric[0].delta == f"{spread_now - spread_then:+.0f} bp vs a year earlier"
+    assert app.metric[0].delta == f"{spread_now - spread_then:+.0f} bp vs 1y ago"
     assert app.metric[1].value == f"{ten_now:.2f}%"
-    assert app.metric[1].delta == f"{(ten_now - ten_then) * 100:+.0f} bp vs a year earlier"
+    assert app.metric[1].delta == f"{(ten_now - ten_then) * 100:+.0f} bp vs 1y ago"
     assert app.metric[2].value == expected_lead_kpi(real_yields, "10Y - 2Y", yc.MIN_DAYS_DEFAULT, yc.MAX_LEAD_DEFAULT)
 
     insight = app.info[0].value

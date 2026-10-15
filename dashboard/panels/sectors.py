@@ -111,6 +111,7 @@ BETA = "Beta vs S&P 500"
 
 # Everything the panel needs to know about each measure, in one place:
 #   percent          - stored as a fraction (0.12) and shown as a percentage (12.0%)
+#   signed           - always write the + or - sign in front of the number (+12.3%)
 #   bar_colour       - "sign" (blue if >= 0, red if < 0), "blue" or "red"
 #   higher_is_better - sort order of the ranking (best at the top)
 #   best_label / worst_label - KPI titles for the top and bottom sector
@@ -122,6 +123,7 @@ METRICS = {
     TOTAL_RETURN: {
         "short": "total return",
         "percent": True,
+        "signed": True,  # a gain and a loss look different: +12.3% and -12.3%
         "bar_colour": "sign",
         "higher_is_better": True,
         "best_label": "Best",
@@ -135,6 +137,7 @@ METRICS = {
     VOLATILITY: {
         "short": "volatility",
         "percent": True,
+        "signed": False,
         "bar_colour": "blue",
         "higher_is_better": False,  # less risk ranks higher
         "best_label": "Calmest",
@@ -149,6 +152,7 @@ METRICS = {
     SHARPE: {
         "short": "Sharpe ratio",
         "percent": False,
+        "signed": False,
         "bar_colour": "sign",
         "higher_is_better": True,
         "best_label": "Best",
@@ -163,6 +167,7 @@ METRICS = {
     DRAWDOWN: {
         "short": "max drawdown",
         "percent": True,
+        "signed": False,  # always 0 or negative, so the - sign shows anyway
         "bar_colour": "red",
         "higher_is_better": True,  # -10% is a smaller fall than -30%
         "best_label": "Best",
@@ -177,16 +182,21 @@ METRICS = {
     BETA: {
         "short": "beta",
         "percent": False,
+        "signed": False,
         "bar_colour": "blue",
         "higher_is_better": False,  # less market risk ranks higher
         "best_label": "Lowest",
         "worst_label": "Highest",
-        "beat_phrase": "had a beta below 1, so moved less than the market",
-        "story": "{worst} moved most with the market (beta {worst_value}) and {best} "
-                 "least (beta {best_value})",
-        "legend": ("Beta below 1 (defensive)", "Beta above 1 (aggressive)"),
+        # Beta measures how strongly a sector follows the S&P 500, NOT how much it
+        # swings: in 2022 Energy had a beta of 0.64 but was the most volatile sector.
+        "beat_phrase": "had a beta below 1, so were less sensitive to S&P 500 moves",
+        "story": "{worst} was the most sensitive to the market (beta {worst_value}) and "
+                 "{best} the least (beta {best_value})",
+        "legend": ("Beta below 1 (less market-sensitive)", "Beta above 1 (more market-sensitive)"),
         "delta_color": "off",
-        "help": "How much a sector moves when the S&P 500 moves 1%: cov(sector, S&P 500) / var(S&P 500).",
+        "help": "How much a sector tended to move when the S&P 500 moved 1%: "
+                "cov(sector, S&P 500) / var(S&P 500). It measures sensitivity to the market, "
+                "not the size of the sector's own swings (that is volatility).",
     },
 }
 DEFAULT_RISK_FREE = 2.0  # % per year, starting value of the risk-free rate slider
@@ -253,6 +263,21 @@ def day_label(day) -> str:
     return f"{day.day} {day.strftime('%b %Y')}"
 
 
+def clean_prices(prices: pd.DataFrame) -> pd.DataFrame:
+    """Prices ready for the panel: no half-finished last day and no gaps.
+
+    * Days without an S&P 500 price are dropped. A download made during US
+      trading hours can end with a day on which only some ETFs have a price.
+    * A single missing price inside a ticker's history (a gap in the download)
+      is filled with the previous close (``ffill``), i.e. "no change that day",
+      so one bad row can't knock a sector out of a whole period.
+    ``ffill`` only fills forward from a ticker's first real price, so the empty
+    prices *before* an ETF started trading (XLC before June 2018) stay NaN.
+    """
+    has_benchmark_price = prices[BENCHMARK].notna()
+    return prices[has_benchmark_price].ffill()
+
+
 def period_dates(period: str, last_date, custom_start=None,
                  custom_end=None) -> tuple[pd.Timestamp, pd.Timestamp]:
     """First and last date of the chosen period.
@@ -296,14 +321,17 @@ def window_prices(prices: pd.DataFrame, start, end) -> pd.DataFrame:
 def split_by_data_coverage(window: pd.DataFrame) -> tuple[list[str], list[str]]:
     """Split the tickers into (complete, excluded).
 
-    A ticker is complete when it has a price on every day of the window. An
-    ETF that started trading inside the window (XLC in 2018) has no starting
-    price, so its return can't be compared fairly and it is excluded.
+    A ticker is excluded when it has no price on the window's first day. That
+    happens when an ETF started trading inside the window (XLC in June 2018):
+    without a starting price its return can't be compared fairly with the others.
+    The window should come from clean_prices, so a ticker with a first price
+    has a price on every later day too (gaps were filled).
     """
+    first_day = window.iloc[0]
     complete = []
     excluded = []
     for ticker in window.columns:
-        if window[ticker].notna().all():
+        if pd.notna(first_day[ticker]):
             complete.append(ticker)
         else:
             excluded.append(ticker)
@@ -423,14 +451,14 @@ def format_value(value: float, metric: str, relative: bool = False) -> str:
     if pd.isna(value):
         return "n/a"
     spec = METRICS[metric]
-    if spec["percent"]:
-        if relative:
+    if relative:  # a difference from the S&P 500 always shows its sign
+        if spec["percent"]:
             return f"{value * 100:+.1f} pp"
-        if spec["bar_colour"] == "sign":  # returns: always show the + or - sign
+        return f"{value:+.2f}"
+    if spec["percent"]:
+        if spec["signed"]:
             return f"{value * 100:+.1f}%"
         return f"{value * 100:.1f}%"
-    if relative:
-        return f"{value:+.2f}"
     return f"{value:.2f}"
 
 
@@ -441,6 +469,24 @@ def count_phrase(count: int, total: int) -> str:
     if count == total:
         return f"all {total} sectors"
     return f"{count} of the {total} sectors"
+
+
+def all_sharpe_ratios_negative(metric: str, ranked: pd.Series) -> bool:
+    """True when the measure is the Sharpe ratio and every sector's ratio is below zero.
+
+    Below zero the Sharpe ratio stops being a fair ranking: a loss divided by
+    a BIGGER volatility gives a number closer to zero, so the riskiest sector
+    looks "best". (COVID crash: Technology lost more than Health Care and was
+    riskier, yet had the higher Sharpe ratio.) The panel then words things differently.
+    """
+    return metric == SHARPE and ranked.max() < 0
+
+
+def kpi_labels(metric: str, ranked: pd.Series) -> tuple[str, str]:
+    """Titles of the top and bottom sector's key numbers, e.g. ('Best', 'Worst')."""
+    if all_sharpe_ratios_negative(metric, ranked):
+        return "Highest", "Lowest"  # not "best": see all_sharpe_ratios_negative
+    return METRICS[metric]["best_label"], METRICS[metric]["worst_label"]
 
 
 def leader_story(metric: str, ranked: pd.Series) -> str:
@@ -457,6 +503,14 @@ def leader_story(metric: str, ranked: pd.Series) -> str:
     if metric == TOTAL_RETURN and ranked[worst] > 0:
         return (f"every sector made money: {sector_name(best)} led with {best_value} "
                 f"and {sector_name(worst)} gained least ({worst_value})")
+    if all_sharpe_ratios_negative(metric, ranked):
+        return (f"every sector earned less than the risk-free rate, so all Sharpe ratios were "
+                f"negative: {sector_name(best)} was least negative ({best_value}) and "
+                f"{sector_name(worst)} most negative ({worst_value})")
+    # A negative beta means the sector tended to go UP on days the S&P 500 went down
+    if metric == BETA and ranked[best] < 0:
+        return (f"{sector_name(worst)} was the most sensitive to the market (beta {worst_value}) "
+                f"and {sector_name(best)} even tended to move against it (beta {best_value})")
     return METRICS[metric]["story"].format(best=sector_name(best), best_value=best_value,
                                            worst=sector_name(worst), worst_value=worst_value)
 
@@ -466,9 +520,13 @@ def ranking_insight(metric: str, ranked: pd.Series, benchmark_value: float, peri
 
     ``ranked`` is the output of rank_sectors (best first, absolute values).
     """
+    story = f"Over {period_phrase}, {leader_story(metric, ranked)}"
+    if all_sharpe_ratios_negative(metric, ranked):
+        # Counting who "beat" the S&P 500 would repeat the unfair ranking, so warn instead
+        return (story + ". Below zero, a riskier sector gets a ratio closer to zero, so this "
+                "ranking isn't a fair test: compare total returns instead.")
     winners = int(beats_benchmark(ranked, benchmark_value, metric).sum())
-    text = (f"Over {period_phrase}, {leader_story(metric, ranked)}; "
-            f"{count_phrase(winners, len(ranked))} {METRICS[metric]['beat_phrase']}")
+    text = f"{story}; {count_phrase(winners, len(ranked))} {METRICS[metric]['beat_phrase']}"
     if metric == BETA:
         return text + "."  # the S&P 500's beta is always 1, no need to repeat it
     return text + f" ({format_value(benchmark_value, metric)})."
@@ -495,8 +553,10 @@ def thin_to_weekly(growth: pd.DataFrame) -> pd.DataFrame:
 
 def growth_insight(growth: pd.DataFrame, highlight: str, highlight_drawdown: float) -> str:
     """Insight for the Growth view: where $100 in the highlighted sector ended vs the S&P 500."""
-    sector_end = growth[highlight].iloc[-1]
-    benchmark_end = growth[BENCHMARK].iloc[-1]
+    # Round to whole cents BEFORE subtracting, so the gap in the sentence is
+    # exactly the difference of the two amounts the reader sees next to it
+    sector_end = round(float(growth[highlight].iloc[-1]), 2)
+    benchmark_end = round(float(growth[BENCHMARK].iloc[-1]), 2)
     difference = sector_end - benchmark_end  # dollars per $100, i.e. percentage points
 
     text = (f"$100 put into {sector_name(highlight)} at the close on {day_label(growth.index[0])} "
@@ -567,6 +627,10 @@ def value_axis_range(plotted: list[float]) -> list[float]:
         low -= room_for_labels
     if high > 0:
         high += room_for_labels
+    else:
+        # Every bar is negative (e.g. drawdowns): an axis ending exactly at 0 would
+        # put the '0%' tick label on the chart's right edge, where Plotly hides it
+        high = 0.06 * span
     return [low, high]
 
 
@@ -751,7 +815,11 @@ def build_growth_chart(growth: pd.DataFrame, highlight: str, recessions: list | 
     theme.style_figure(fig, y_title="Value of $100 invested ($)")
     fig.update_xaxes(range=[start, end], hoverformat="%d %b %Y", automargin=True)
     fig.update_yaxes(tickprefix="$", tickformat=",.0f", automargin=True)
-    fig.update_layout(margin=dict(r=72, t=44))
+    # Legend under the chart: at the top it would sit under Plotly's toolbar,
+    # which covers it whenever the mouse is over the chart.
+    # Right margin: room for the end labels ("XLK $245")
+    fig.update_layout(margin=dict(r=72),
+                      legend=dict(orientation="h", y=-0.08, yanchor="top", x=0))
     return fig
 
 
@@ -761,8 +829,8 @@ def build_growth_chart(growth: pd.DataFrame, highlight: str, recessions: list | 
 
 @st.cache_data(show_spinner=False)
 def _cached_prices() -> pd.DataFrame:
-    """load_data() cached, so the CSV is read once and not on every click."""
-    return load_data()
+    """load_data() + clean_prices(), cached so the CSV is read once and not on every click."""
+    return clean_prices(load_data())
 
 
 @st.cache_data(show_spinner=False)
@@ -771,51 +839,81 @@ def _cached_recession_periods() -> list:
     return recession_periods(load_recessions())
 
 
+def _custom_default_dates(first_day: datetime.date, last_day: datetime.date) -> tuple:
+    """Starting value of the Custom dates picker: 1 Jan 2020 (or the first day of data) to the last day."""
+    default_start = min(max(CUSTOM_DEFAULT_START, first_day), last_day)
+    return default_start, last_day
+
+
+def _remember_hidden_controls(first_day: datetime.date, last_day: datetime.date) -> None:
+    """Keep the values of the controls that are only shown some of the time.
+
+    Streamlit forgets a widget's value on a rerun where the widget isn't drawn
+    (e.g. the Relative toggle while the Growth view is shown), and the widget
+    would come back with its default. Copying every value into st.session_state
+    ourselves on each run keeps it. These widgets are then created without
+    value=/index= and take their value from session_state.
+    """
+    defaults = {
+        KEY_METRIC: TOTAL_RETURN,
+        KEY_RELATIVE: False,
+        KEY_RISK_FREE: DEFAULT_RISK_FREE,
+        KEY_HIGHLIGHT: DEFAULT_HIGHLIGHT,
+        KEY_DATES: _custom_default_dates(first_day, last_day),
+    }
+    for key, default in defaults.items():
+        st.session_state[key] = st.session_state.get(key, default)
+
+
 def _draw_controls(first_date: pd.Timestamp, last_date: pd.Timestamp) -> dict:
     """Draw the controls (2 or 3 rows) and return the chosen values.
 
-    Row 1: what to measure (period and measure). Row 2: how to show it (view,
-    plus the option that belongs to that view). Row 3 only appears when it is
-    needed: custom dates (under Period) and the risk-free rate (under Measure,
-    Sharpe ratio only).
+    Row 1: period and view. Row 2: the options of the chosen view (Ranking:
+    the measure and the Relative toggle; Growth of $100: the highlighted
+    sector). Row 3 only appears when it is needed: custom dates (Custom
+    period) and the risk-free rate (Sharpe ratio only).
     """
+    first_day, last_day = first_date.date(), last_date.date()
+    _remember_hidden_controls(first_day, last_day)
+
     row1 = st.columns(2)
     with row1[0]:
         period = st.selectbox("Period", PERIODS, index=PERIODS.index(DEFAULT_PERIOD), key=KEY_PERIOD)
     with row1[1]:
-        metric = st.selectbox("Measure", list(METRICS), key=KEY_METRIC,
-                              help="What the bars rank and the key numbers show.")
+        view = st.radio("View", VIEWS, horizontal=True, key=KEY_VIEW)
 
-    choices = {"period": period, "metric": metric, "custom_dates": None,
-               "risk_free": DEFAULT_RISK_FREE / 100, "relative": False, "highlight": DEFAULT_HIGHLIGHT}
+    # Values used when a control isn't shown. The Growth view's lines show what
+    # $100 became, i.e. the total return, so its key numbers show total return too.
+    choices = {"period": period, "view": view, "metric": TOTAL_RETURN, "relative": False,
+               "highlight": DEFAULT_HIGHLIGHT, "custom_dates": None,
+               "risk_free": st.session_state[KEY_RISK_FREE] / 100}
 
-    row2 = st.columns(2)
-    with row2[0]:
-        choices["view"] = st.radio("View", VIEWS, horizontal=True, key=KEY_VIEW)
-    with row2[1]:
-        if choices["view"] == RANKING:
-            choices["relative"] = st.toggle("Relative to S&P 500", value=False, key=KEY_RELATIVE,
+    # vertical_alignment="bottom" lines the toggle up with the Measure box, not its label
+    row2 = st.columns(2, vertical_alignment="bottom")
+    if view == RANKING:
+        with row2[0]:
+            choices["metric"] = st.selectbox("Measure", list(METRICS), key=KEY_METRIC,
+                                             help="What the bars rank and the key numbers show.")
+        with row2[1]:
+            choices["relative"] = st.toggle("Relative to S&P 500", key=KEY_RELATIVE,
                                             help="Show each sector minus the S&P 500 (e.g. return "
                                                  "difference in percentage points).")
-        else:
-            choices["highlight"] = st.selectbox("Highlight sector", list(SECTORS),
-                                                index=list(SECTORS).index(DEFAULT_HIGHLIGHT),
-                                                format_func=sector_name, key=KEY_HIGHLIGHT)
+    else:
+        with row2[0]:
+            choices["highlight"] = st.selectbox("Highlight sector", list(SECTORS), format_func=sector_name,
+                                                key=KEY_HIGHLIGHT, help="The sector drawn in blue.")
 
-    if period == CUSTOM or metric == SHARPE:
+    if period == CUSTOM or choices["metric"] == SHARPE:
         row3 = st.columns(2)
         with row3[0]:
             if period == CUSTOM:
-                first_day, last_day = first_date.date(), last_date.date()
-                default_start = min(max(CUSTOM_DEFAULT_START, first_day), last_day)
-                choices["custom_dates"] = st.date_input(
-                    "Custom dates", value=(default_start, last_day), min_value=first_day,
-                    max_value=last_day, key=KEY_DATES, format="DD/MM/YYYY")
+                choices["custom_dates"] = st.date_input("Custom dates", min_value=first_day,
+                                                        max_value=last_day, key=KEY_DATES,
+                                                        format="DD/MM/YYYY")
         with row3[1]:
-            if metric == SHARPE:
+            if choices["metric"] == SHARPE:
                 risk_free = st.slider("Risk-free rate (per year)", min_value=0.0, max_value=6.0,
-                                      value=DEFAULT_RISK_FREE, step=0.25, format="%.2f%%",
-                                      key=KEY_RISK_FREE,
+                                      step=0.25, format="%.2f%%", key=KEY_RISK_FREE,
                                       help="Return on a safe investment such as 3-month US Treasury "
                                            "bills. The Sharpe ratio rewards only the return above it.")
                 choices["risk_free"] = risk_free / 100
@@ -823,32 +921,40 @@ def _draw_controls(first_date: pd.Timestamp, last_date: pd.Timestamp) -> dict:
 
 
 def _custom_range(dates) -> tuple:
-    """(start, end) from the date picker. While only one date is picked, start = end."""
-    if isinstance(dates, (list, tuple)):
-        picked = [day for day in dates if day is not None]
-    else:
-        picked = [dates]
-    if not picked:
+    """(start, end) from the date picker, or (None, None) until both dates are picked.
+
+    The range picker gives a tuple: () before any click, (start,) after the
+    first click (older Streamlit versions rerun the app at that moment), and
+    (start, end) once both dates are picked.
+    """
+    if not isinstance(dates, (list, tuple)):
         return None, None
-    return picked[0], picked[-1]
+    picked = [day for day in dates if day is not None]
+    if len(picked) < 2:
+        return None, None
+    return picked[0], picked[1]
 
 
 def _draw_kpis(ranked: pd.Series, benchmark_value: float, metric: str, sector_count: int) -> None:
     """Three key numbers: the S&P 500's value, the best sector and the worst sector."""
     spec = METRICS[metric]
     best, worst = ranked.index[0], ranked.index[-1]
+    best_label, worst_label = kpi_labels(metric, ranked)
+    delta_color = spec["delta_color"]
+    if all_sharpe_ratios_negative(metric, ranked):
+        delta_color = "off"  # a less negative Sharpe ratio isn't clearly "good" (no green/red)
     winners = int(beats_benchmark(ranked, benchmark_value, metric).sum())
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric(f"S&P 500 {spec['short']}", format_value(benchmark_value, metric),
                   help=f"{spec['help']} {count_phrase(winners, sector_count).capitalize()} "
                        f"{spec['beat_phrase']} in this period.")
-    for column, label, ticker in [(col2, spec["best_label"], best), (col3, spec["worst_label"], worst)]:
+    for column, label, ticker in [(col2, best_label, best), (col3, worst_label, worst)]:
         difference = ranked[ticker] - benchmark_value
         with column:
             st.metric(f"{label}: {short_name(ticker)}", format_value(ranked[ticker], metric),
                       delta=f"{format_value(difference, metric, relative=True)} vs S&P 500",
-                      delta_color=spec["delta_color"], help=f"{ticker_label(ticker)}. {spec['help']}")
+                      delta_color=delta_color, help=f"{ticker_label(ticker)}. {spec['help']}")
 
 
 def _window_caption(window: pd.DataFrame, excluded: list[str]) -> str:
@@ -860,7 +966,7 @@ def _window_caption(window: pd.DataFrame, excluded: list[str]) -> str:
         names = []
         for ticker in excluded:
             names.append(ticker_label(ticker))
-        text += " Not shown, no prices for the whole period: " + ", ".join(names) + "."
+        text += " Not shown, no price at the start of the period: " + ", ".join(names) + "."
     return text
 
 
@@ -900,13 +1006,18 @@ trading day counts. $P_t$ = price on day $t$, $r_t = P_t / P_{t-1} - 1$ = daily 
 - **Sharpe ratio** $= \dfrac{\text{mean}(r_t - r_f) \times 252}{\text{std}(r_t) \times \sqrt{252}}$,
   with daily risk-free rate $r_f$ = annual rate ÷ 252
 - **Maximum drawdown** $= \min_t \left( P_t / \max_{s \le t} P_s - 1 \right)$, the worst fall from an earlier high
-- **Beta** $\beta = \text{cov}(r_{\text{sector}}, r_{\text{S\&P}}) \,/\, \text{var}(r_{\text{S\&P}})$
+- **Beta** $\beta = \text{cov}(r_{\text{sector}}, r_{\text{S\&P}}) \,/\, \text{var}(r_{\text{S\&P}})$:
+  how strongly a sector follows the S&P 500, not how much it swings (a sector can have a low
+  beta and still be very volatile, like Energy in 2022)
 - **Relative to S&P 500** = sector value − S&P 500 value (percentage points, pp, for % measures)
 
 Bars are sorted best first: highest return, Sharpe ratio and drawdown (smallest fall),
-lowest volatility and beta. A sector without a price on every day of the period is left out
-(XLRE only trades from Oct 2015 and XLC from Jun 2018). Periods longer than
-about 2½ years are drawn with one point per week.
+lowest volatility and beta. When excess returns are negative, a more volatile sector gets a
+*less* negative Sharpe ratio, so a ranking of negative Sharpe ratios is not a fair test of
+risk-adjusted performance. A sector without a price at the start of the period is left out
+(XLRE only trades from Oct 2015 and XLC from Jun 2018); a single missing day inside the data
+is filled with the previous close. The Growth of \$100 view and its key numbers use total
+return. Periods longer than about 2½ years are drawn with one point per week.
 """
 
 
@@ -930,7 +1041,7 @@ def render() -> None:
     except Exception as exc:  # no snapshot and no internet, or a broken CSV
         ui.no_data_message("Sector price", exc)
         return
-    if prices.empty or prices[BENCHMARK].dropna().empty:
+    if prices.empty:  # clean_prices keeps only days with an S&P 500 price
         ui.no_data_message("Sector price", ValueError("the data file has no S&P 500 prices"))
         return
 
@@ -941,7 +1052,7 @@ def render() -> None:
     if choices["period"] == CUSTOM:
         custom_start, custom_end = _custom_range(choices["custom_dates"])
         if custom_start is None:
-            st.info("Pick a start and an end date.")
+            st.info("Pick both a start and an end date in the calendar.")
             return
         first_day, last_day = min(custom_start, custom_end), max(custom_start, custom_end)
         period_phrase = f"{day_label(first_day)} – {day_label(last_day)}"
@@ -955,7 +1066,7 @@ def render() -> None:
                 f"sectors. Pick a period of at least {MIN_TRADING_DAYS} trading days.")
         return
 
-    # 2) Keep only the tickers with a price on every day of the window
+    # 2) Leave out the ETFs without a starting price (launched inside the window)
     complete, excluded = split_by_data_coverage(window)
     if BENCHMARK not in complete or len(complete) < 2:
         st.info("The S&P 500 or every sector is missing prices in this period. Try another period.")

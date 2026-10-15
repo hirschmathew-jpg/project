@@ -5,6 +5,7 @@ The AppTest tests run the real panel on the CSV snapshot in data/ and move
 every control to check nothing crashes.
 """
 
+import json
 import math
 
 import numpy as np
@@ -148,6 +149,38 @@ def test_histogram_when_every_value_is_the_same():
     bins = portfolio.histogram_table(np.full(50, 500.0), n_bins=5)
     assert bins["share_pct"].sum() == pytest.approx(100.0)
     assert bins["from"].iloc[0] < 500 < bins["to"].iloc[-1]
+    log_bins = portfolio.histogram_table(np.full(50, 500.0), n_bins=5, log_scale=True)
+    assert log_bins["share_pct"].sum() == pytest.approx(100.0)
+
+
+def skewed_outcomes():
+    """Final values like a bitcoin-heavy portfolio: lognormal, the best are ~100x the worst."""
+    rng = np.random.default_rng(0)
+    return 10_000 * np.exp(rng.normal(0.5, 1.5, size=5000))
+
+
+def test_log_scale_histogram_spreads_out_skewed_outcomes():
+    final = skewed_outcomes()
+    # Regression: equal-width bins put most simulations into the first bar
+    linear = portfolio.histogram_table(final)
+    assert linear["share_pct"].iloc[0] > 50
+    # Log-scale bins: every bin covers the same ratio, nothing is cut off, no bar dominates
+    bins = portfolio.histogram_table(final, log_scale=True)
+    assert len(bins) == portfolio.HISTOGRAM_BINS
+    assert bins["from"].iloc[0] == pytest.approx(final.min())
+    assert bins["to"].iloc[-1] == pytest.approx(final.max())
+    ratios = bins["to"] / bins["from"]
+    assert ratios.to_numpy() == pytest.approx(np.full(len(bins), ratios.iloc[0]))
+    assert bins["share_pct"].sum() == pytest.approx(100.0)
+    assert bins["share_pct"].max() < 25
+
+
+def test_use_log_scale_only_for_very_spread_out_outcomes():
+    # 5% best case 4x the 5% worst case (a typical mixed portfolio): linear axis
+    assert not portfolio.use_log_scale({"p5": 15_000, "p95": 60_000})
+    # 300x (all bitcoin over 10 years): log axis
+    assert portfolio.use_log_scale({"p5": 2_000, "p95": 600_000})
+    assert not portfolio.use_log_scale({"p5": 1_000, "p95": 10_000})  # exactly 10x stays linear
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +244,7 @@ def btc_style_prices(end="2024-03-31"):
     etf[pd.Timestamp("2024-01-31")] = 50.0   # Wednesday
     etf[pd.Timestamp("2024-02-29")] = 55.0   # Thursday
     etf[pd.Timestamp("2024-03-29")] = 52.0   # Friday, the ETF's last trading day in March
-    return pd.DataFrame({"S": etf, "B": btc})
+    return pd.DataFrame({"S": etf, "B": btc}).loc[:end]
 
 
 def test_monthly_log_returns_with_seven_day_bitcoin_data():
@@ -232,6 +265,20 @@ def test_unfinished_last_month_is_dropped():
     # Data stopping on the last Friday of a month (ETF only) still counts as a full month
     etf_only = btc_style_prices()[["S"]].loc[:"2024-03-29"]
     assert portfolio.monthly_log_returns(etf_only).index[-1] == pd.Timestamp("2024-03-31")
+    # Data stopping on Sunday 31 March: bitcoin AND the ETF (Fri 29 Mar) have finished March
+    assert portfolio.monthly_log_returns(btc_style_prices()).index[-1] == pd.Timestamp("2024-03-31")
+
+
+def test_month_is_unfinished_until_every_asset_reaches_its_last_weekday():
+    # Regression: data ending Wed 27 March (bitcoin trades every day, so the last row is a
+    # bitcoin date) used to count March as finished because it was within 3 days of the 31st.
+    # The ETF still has Thu 28 and Fri 29 March to trade, so March must be dropped.
+    returns = portfolio.monthly_log_returns(btc_style_prices(end="2024-03-27"))
+    assert returns.index[-1] == pd.Timestamp("2024-02-29")
+    # Bitcoin is up to date (Sun 31 Mar) but the ETF's Friday price is missing: still unfinished
+    prices = btc_style_prices()
+    prices.loc["2024-03-29", "S"] = np.nan
+    assert portfolio.monthly_log_returns(prices).index[-1] == pd.Timestamp("2024-02-29")
 
 
 def test_only_months_where_every_asset_has_data_are_used():
@@ -279,12 +326,39 @@ def test_snapshot_is_shipped_with_all_four_assets():
 def test_format_helpers():
     assert portfolio.format_money(12_345.6) == "$12,346"
     assert portfolio.format_money(2_345_678) == "$2.35M"
+    assert portfolio.format_money(1_165_280_000) == "$1.17B"     # not "$1,165.28M"
+    assert portfolio.format_money(2.6e13) == "$26.00T"           # not "$26,000,000.00M"
+    assert portfolio.format_money_short(500) == "$500"
+    assert portfolio.format_money_short(20_000) == "$20k"
+    assert portfolio.format_money_short(1_500_000) == "$1.5M"
+    assert portfolio.format_money_short(2e9) == "$2B"            # not d3's "$2G"
+    assert portfolio.format_money_short(1e12) == "$1T"
+    assert portfolio.format_change(28_591, 10_000) == "+186% vs start"
+    assert portfolio.format_change(8_207, 10_000) == "-18% vs start"
+    assert portfolio.format_change(245_973, 10_000) == "×25 vs start"  # not "+2360% vs start"
     assert portfolio.format_chance(0) == "0%"
     assert portfolio.format_chance(0.0002) == "<0.1%"
     assert portfolio.format_chance(0.0123) == "1.2%"
     assert portfolio.years_label(1) == "1 year"
     assert portfolio.years_label(30) == "30 years"
     assert portfolio.escape_dollars("$10 to $20") == "\\$10 to \\$20"
+
+
+def test_log_axis_ticks_are_round_and_not_too_many():
+    # A narrow range gets 1-2-5 steps
+    assert portfolio.log_axis_ticks(8_000, 300_000) == [10_000, 20_000, 50_000, 100_000, 200_000]
+    # Too many 1-2-5 steps: 1-3 steps instead
+    assert portfolio.log_axis_ticks(1_500, 700_000) == [3_000, 10_000, 30_000, 100_000, 300_000]
+    # Many powers of ten: powers of ten only, and every second one for a huge range
+    assert portfolio.log_axis_ticks(150, 15_000_000) == [1e3, 1e4, 1e5, 1e6, 1e7]
+    huge = portfolio.log_axis_ticks(10, 1e12)
+    assert huge == [10, 1e3, 1e5, 1e7, 1e9, 1e11]
+    assert len(huge) <= 7
+
+
+def test_axis_position():
+    assert portfolio.axis_position(10_000, log_scale=False) == 10_000
+    assert portfolio.axis_position(10_000, log_scale=True) == pytest.approx(4.0)
 
 
 def test_describe_mix():
@@ -312,11 +386,35 @@ def test_insight_covers_gain_loss_and_no_loss_cases():
     small_loss = portfolio.describe_downside(make_stats(20_000, 11_000, 0.012), 10_000)
     assert "still worth $11,000" in small_loss and "1.2%" in small_loss
 
-    big_loss = portfolio.write_insight("Histogram", make_stats(9_000, 6_000, 0.6, growth=-0.02), weights,
-                                       "Inflation shock", 5, 10_000, corr, "2021-2026")
+    big_loss = portfolio.write_insight(portfolio.VIEW_OUTCOMES, make_stats(9_000, 6_000, 0.6, growth=-0.02),
+                                       weights, "Inflation shock", 5, 10_000, corr, "2021-2026")
     assert "shrinks $10,000 to $9,000" in big_loss
     assert "-2.0% a year" in big_loss
-    assert "worth just $6,000, a 40% loss" in big_loss and "60.0%" in big_loss
+    assert "worth just $6,000, a loss of 40%" in big_loss and "60.0%" in big_loss
+
+    # Regression: "a 18% loss" was bad grammar; a tiny loss doesn't read "a loss of 0%"
+    assert "a loss of 18%" in portfolio.describe_downside(make_stats(20_000, 8_207, 0.09), 10_000)
+    assert "a loss of less than 1%" in portfolio.describe_downside(make_stats(20_000, 9_980, 0.05), 10_000)
+
+
+def test_high_return_caution_names_the_fastest_asset_held():
+    yearly = {"SPY": 14.2, "AGG": 1.1, "GLD": 11.1, "BTC-USD": 49.2}
+    with_bitcoin = {"SPY": 0.5, "AGG": 0.3, "GLD": 0.1, "BTC-USD": 0.1}
+    text = portfolio.high_return_caution(yearly, with_bitcoin, "Oct 2016 – Sep 2026")
+    assert "bitcoin averaged +49% a year over Oct 2016 – Sep 2026" in text
+    assert "very unlikely to last" in text
+    # No bitcoin in the portfolio, or no asset above the limit: no caution
+    without_bitcoin = {"SPY": 0.6, "AGG": 0.4, "GLD": 0.0, "BTC-USD": 0.0}
+    assert portfolio.high_return_caution(yearly, without_bitcoin, "Oct 2016 – Sep 2026") == ""
+    calm = {"SPY": 12.8, "AGG": -0.6, "GLD": 16.8, "BTC-USD": 12.9}
+    assert portfolio.high_return_caution(calm, with_bitcoin, "Oct 2021 – Sep 2026") == ""
+
+
+def test_average_yearly_returns():
+    returns = pd.DataFrame({"A": [0.01, 0.03], "B": [0.0, -0.01]})
+    averages = portfolio.average_yearly_returns(returns)
+    assert averages["A"] == pytest.approx(24.0)  # 0.02 a month x 12 = 24% a year
+    assert averages["B"] == pytest.approx(-6.0)
 
 
 def test_correlation_insight_names_the_extreme_pairs():
@@ -355,6 +453,20 @@ def test_fan_chart_bands_colours_and_single_axis():
     median = [trace for trace in fig.data if trace.name == "Median"][0]
     assert median.line.width == 2
     assert "yaxis2" not in fig.layout.to_plotly_json()
+    assert fig.layout.yaxis.type != "log"
+    assert fig.layout.yaxis.tickformat is None  # Plotly's own labels: $20k, $1M, $2B (never "$2G")
+
+
+def test_fan_chart_on_a_log_scale():
+    paths = portfolio.percentile_paths(example_values())
+    paths.index = pd.date_range("2026-09-30", periods=len(paths), freq="ME")
+    fig = portfolio.build_fan_chart(paths, 10_000, log_scale=True)
+    assert fig.layout.yaxis.type == "log"
+    assert "log scale" in fig.layout.yaxis.title.text
+    assert all(label.startswith("$") for label in fig.layout.yaxis.ticktext)
+    # On a log axis Plotly places the median label at log10(value)
+    median_label = fig.layout.annotations[0]
+    assert median_label.y == pytest.approx(math.log10(paths["p50"].iloc[-1]))
 
 
 def test_histogram_chart_has_three_labelled_reference_lines():
@@ -365,6 +477,25 @@ def test_histogram_chart_has_three_labelled_reference_lines():
     labels = " ".join(annotation.text for annotation in fig.layout.annotations)
     assert "Median" in labels and "Start $10,000" in labels and "5% worst case" in labels
     assert fig.data[0].marker.color == theme.BLUE
+    assert fig.layout.xaxis.type != "log"
+    assert fig.layout.yaxis.range[1] <= 100  # never a tick above 100% of simulations
+
+
+def test_histogram_on_a_log_scale_keeps_reference_lines_apart():
+    final = skewed_outcomes()
+    values = np.column_stack([np.full(len(final), 10_000.0), final])
+    stats = portfolio.outcome_stats(values, 10_000, 10)
+    assert portfolio.use_log_scale(stats)
+    bins = portfolio.histogram_table(final, log_scale=True)
+    fig = portfolio.build_histogram(bins, stats, 10_000, 10, log_scale=True)
+    assert fig.layout.xaxis.type == "log"
+    assert "log scale" in fig.layout.xaxis.title.text
+    # Lines (shapes) use dollars; their labels (annotations) use log10(dollars) on a log axis
+    assert fig.layout.shapes[1].x0 == 10_000
+    assert fig.layout.annotations[1].x == pytest.approx(4.0)
+    # The x range (in log10 units) covers every bin and the starting amount
+    low, high = fig.layout.xaxis.range
+    assert low < math.log10(bins["from"].iloc[0]) and high > math.log10(bins["to"].iloc[-1])
 
 
 def test_correlation_heatmap_labels_every_cell():
@@ -460,6 +591,30 @@ def test_every_control_and_view_can_be_changed():
     assert "moved together the most" in at.info[0].value  # correlation insight
 
 
+def chart_spec(at):
+    """The Plotly figure (as a dict) that the panel drew in an AppTest run."""
+    return json.loads(at.get("plotly_chart")[0].proto.spec)
+
+
+def test_bitcoin_heavy_portfolio_gets_log_scales_and_a_caution():
+    at = run_panel()
+    assert chart_spec(at)["layout"]["yaxis"].get("type") != "log"  # default mix: linear axis
+    for ticker in ["SPY", "AGG", "GLD"]:
+        at.slider(key=f"portfolio_weight_{ticker}").set_value(0)
+    at.slider(key="portfolio_weight_BTC-USD").set_value(100)
+    at.selectbox(key="portfolio_window").set_value("Last 10 years")
+    at.slider(key="portfolio_horizon").set_value(30)
+    at.run()
+    assert_no_errors(at)
+    assert chart_spec(at)["layout"]["yaxis"]["type"] == "log"
+    assert at.metric[0].value.endswith("B")              # billions, not "$25,277.36M"
+    assert at.metric[0].delta.startswith("×")            # a multiple, not "+252773518%"
+    assert any("Caution:" in caption.value and "bitcoin averaged" in caption.value for caption in at.caption)
+    at.radio(key="portfolio_view").set_value(portfolio.VIEW_OUTCOMES).run()
+    assert_no_errors(at)
+    assert chart_spec(at)["layout"]["xaxis"]["type"] == "log"
+
+
 def test_new_random_draw_changes_the_seed_and_the_results():
     at = run_panel()
     assert at.session_state["portfolio_seed"] == portfolio.DEFAULT_SEED
@@ -496,9 +651,9 @@ def test_extreme_combination_of_controls():
     at.selectbox(key="portfolio_scenario").set_value("Crypto winter")
     at.selectbox(key="portfolio_window").set_value("All data")
     at.slider(key="portfolio_horizon").set_value(30)
-    at.number_input(key="portfolio_start").set_value(10_000_000)
+    at.number_input(key="portfolio_start").set_value(portfolio.MAX_START_AMOUNT)
     at.select_slider(key="portfolio_simulations").set_value(5000)
-    at.radio(key="portfolio_view").set_value("Histogram")
+    at.radio(key="portfolio_view").set_value(portfolio.VIEW_OUTCOMES)
     at.run()
     assert_no_errors(at)
     assert len(at.metric) == 3
@@ -525,6 +680,13 @@ def test_panel_with_too_little_history(monkeypatch):
     assert "Only 12 months" in at.info[0].value
     at.selectbox(key="portfolio_window").set_value("All data").run()
     assert_no_errors(at)
+
+
+def test_window_options_are_short_enough_to_fit():
+    at = run_panel()
+    # "All data" is shown with its start month, short enough for a half-width drop-down
+    assert at.selectbox(key="portfolio_window").options == ["Last 5 years", "Last 10 years", "Since Oct 2014"]
+    assert at.radio(key="portfolio_view").options == ["Fan chart", "Outcome distribution", "Correlations"]
 
 
 def test_panel_with_no_complete_months(monkeypatch):

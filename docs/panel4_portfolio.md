@@ -17,7 +17,7 @@ Daily adjusted close prices from Yahoo Finance (dividends and splits included, s
 | [GLD](https://finance.yahoo.com/quote/GLD) | SPDR Gold Shares | Gold |
 | [BTC-USD](https://finance.yahoo.com/quote/BTC-USD) | Bitcoin in US dollars | Crypto |
 
-Bitcoin trades 7 days a week and its Yahoo data starts in September 2014. The ETFs trade only on weekdays. `month_end_prices` therefore uses `resample("ME").last()`, which takes each asset's last available price in every month, so a weekend month-end is handled correctly. The newest month is dropped if the data stops mid-month, because a half-month return is not a monthly return. `monthly_log_returns` then keeps only months where **all four** assets have a return, which means October 2014 onwards.
+Bitcoin trades 7 days a week and its Yahoo data starts in September 2014. The ETFs trade only on weekdays. `month_end_prices` therefore uses `resample("ME").last()`, which takes each asset's last available price in every month, so a weekend month-end is handled correctly. The newest month counts as finished only once **every** asset has a price on the month's last weekday (`pd.offsets.BMonthEnd().rollback`, e.g. Fri 29 March 2024). Each asset is checked on its own, because bitcoin's 7-day data means the last date in the table can be a Sunday while the ETFs still have trading days left. Otherwise the month is dropped, because a half-month return is not a monthly return. (In the rare month whose last weekday is a market holiday, the month simply waits for the next refresh.) `monthly_log_returns` then keeps only months where **all four** assets have a return, which means October 2014 onwards.
 
 ## Method
 
@@ -33,6 +33,7 @@ Bitcoin trades 7 days a week and its Yahoo data starts in September 2014. The ET
 
    In month 1 each asset's growth is also multiplied by (1 + shock_i). The output is an array of shape (simulations, months + 1).
 5. **Results:** percentiles 5/25/50/75/95 at every month (the fan), the median final value, the 5th percentile ("5% worst case": 1 in 20 simulations ends lower), the share of final values below the starting amount, and the median annualised growth rate (final / start)^(1/years) − 1.
+6. **Log scale when outcomes are lopsided:** compounding multiplies money, so final values are skewed: a few lucky simulations end far above the rest. When the 5% best case is more than 10 times the 5% worst case (`use_log_scale`), the fan chart's y-axis and the outcome distribution's x-axis switch to a log scale, where every ×10 step takes the same space. The histogram then uses bins that each cover the same *ratio* (`np.geomspace`) instead of the same dollar width. Without this, a 100% bitcoin portfolio put 64% of all simulations into the first of 30 bars, and the median, start and 5% worst-case lines sat on top of each other. On the log scale the tallest bar holds about 9% and the three lines are clearly apart. The axis title says "log scale" whenever it is used, and the tick labels are round amounts ($1k, $10k, $100k...).
 
 Worked checks used in the tests: one asset growing exactly 1% a month with zero volatility gives 1000 × 1.01¹² = 1,126.83 after a year. A 60/40 mix of an asset growing 2% (log) a month and a flat one grows by 0.6 × e^0.02 + 0.4 = 1.01212 each month. A −50% shock to half the portfolio leaves 0.5 × 0.5 + 0.5 = 75%.
 
@@ -44,14 +45,16 @@ The seed starts at 42, so the numbers are identical on every rerun. Comparisons 
 |---|---|
 | Stocks / Bonds / Gold / Bitcoin (0–100%, step 5) | Target weights. If they don't add up to 100% they are rescaled, and the caption says so. All zero shows a message instead of a chart |
 | Scenario | Historical, Inflation shock, Stock market crash, Crypto winter, Goldilocks (assumptions shown in the caption and the Method table) |
-| Estimated from | Estimation window: last 5 years, last 10 years, or all data since Oct 2014 |
-| Horizon (years) | 1 to 30 years ahead (default 10) |
-| Invested ($) | Starting amount (default $10,000) |
-| View | Fan chart (percentile bands over time), Histogram (final values, top 1% cut off), Correlations (4 × 4 heatmap of the window's monthly return correlations) |
+| Estimated from | Estimation window: Last 5 years, Last 10 years, or Since Oct 2014 (all data) |
+| Years ahead | Horizon: 1 to 30 years (default 10) |
+| Invested ($) | Starting amount, invested at the end of the last data month ($1,000 to $1,000,000, default $10,000) |
+| View | Fan chart (percentile bands over time), Outcome distribution (histogram of the final values; on a linear axis the luckiest 1% is cut off, on a log scale every simulation is shown), Correlations (4 × 4 heatmap of the window's monthly return correlations) |
 | Simulations | 500, 1,000, 2,000 (default) or 5,000 simulated futures |
 | New random draw | Re-runs with a new random seed (stored in `st.session_state`) |
 
-KPIs: median value after N years (delta = % vs start), chance of a loss, and the 5% worst case (delta = % vs start). The insight sentence is built from the current results. The first part gives the portfolio mix, the scenario, the median outcome and its yearly growth rate. The second part gives the downside, with separate wording for "no simulation loses money", "even the worst case gains" and "the worst case loses X%". In the Correlations view it names the most and least correlated pairs instead.
+KPIs: median value after N years, chance of a loss, and the 5% worst case. The deltas show the change vs the start in % (e.g. "+186% vs start"), or as a multiple once the value is 10 times the start or more ("×25 vs start" reads better than "+2400%"). Big amounts are written $1.23M, $4.56B or $7.89T. The insight sentence is built from the current results. The first part gives the portfolio mix, the scenario, the median outcome and its yearly growth rate. The second part gives the downside, with separate wording for "no simulation loses money", "even the worst case gains" and "the worst case is a loss of X%". In the Correlations view it names the most and least correlated pairs instead.
+
+**Caution note:** when an asset in the portfolio averaged more than 25% a year in the estimation window (in the snapshot, bitcoin over the last 10 years: +49% a year), the caption under the controls adds a bold "Caution" saying so and that such returns are very unlikely to last. Without it, the panel would quietly report that 100% bitcoin turns $10,000 into a median of $25.28B over 30 years.
 
 ## Code walkthrough
 
@@ -64,20 +67,22 @@ KPIs: median value after N years (delta = % vs start), chance of a loss, and the
 | `apply_scenario`, `scenario_shocks` | Scenario maths: drift / 12, `np.outer` of the volatility multipliers, shocks as decimals |
 | `normalise_weights(raw)` | Weights → fractions that add to 1, or `None` if all are zero |
 | `simulate_portfolio(...)` | The Monte Carlo loop over months, vectorised over simulations |
-| `percentile_paths`, `outcome_stats`, `histogram_table` | Summaries for the fan chart, KPIs and histogram |
+| `percentile_paths`, `outcome_stats`, `histogram_table` | Summaries for the fan chart, KPIs and histogram (equal-width or, on a log scale, equal-ratio bins) |
+| `use_log_scale`, `log_axis_ticks`, `axis_position` | When to use a log scale, round tick values for it, and where a dollar value sits on a log axis (Plotly wants log10 units for ranges and labels) |
+| `average_yearly_returns`, `high_return_caution` | Each asset's average yearly return in the window; the caution note when one held asset is above 25% a year |
 | `extreme_correlations`, `describe_*`, `write_insight` | Nested loop over asset pairs; if/elif branches that build the insight text |
-| `format_money`, `format_chance`, `years_label`, `escape_dollars` | Small formatting helpers (`$` must be escaped because Streamlit reads `$...$` as maths) |
-| `build_fan_chart`, `build_histogram`, `build_correlation_heatmap` | Plotly figures: fill-between bands, labelled reference lines, annotated heatmap |
+| `format_money`, `format_money_short`, `format_change`, `format_chance`, `years_label`, `escape_dollars` | Small formatting helpers (`$` must be escaped because Streamlit reads `$...$` as maths) |
+| `build_fan_chart`, `build_histogram`, `build_correlation_heatmap`, `style_money_axis` | Plotly figures: fill-between bands, labelled reference lines, annotated heatmap; dollar axes, linear or log |
 | `_draw_controls`, `_draw_kpis`, `_method_markdown`, `render` | Streamlit layout. The button uses an `on_click` callback to change the seed |
 
 ## Course concepts used
 
 - **S3 data structures:** dicts for assets, weights, scenarios (a dict of dicts) and results; lists of percentiles and options; tuples for (asset, asset, correlation).
-- **S4 control flow:** the month-by-month simulation loop; nested loops over heatmap cells and asset pairs; if/elif for the insight wording and edge cases (all-zero weights, too little data).
+- **S4 control flow:** the month-by-month simulation loop; nested loops over heatmap cells, asset pairs and tick candidates; a loop with an early `return` to check every asset has finished the month; if/elif for the insight wording, number formats and edge cases (all-zero weights, too little data).
 - **S5 functions:** short functions with docstrings and type hints; pure model functions separate from the Streamlit `render()`.
-- **S6 NumPy, CSV, yfinance:** `default_rng`, `multivariate_normal`, `exp`, `@` (weighted sum), `percentile`, `median`, `outer`, `histogram`; arrays of shape (simulations, months); CSV snapshots; yfinance download.
+- **S6 NumPy, CSV, yfinance:** `default_rng`, `multivariate_normal`, `exp`, `@` (weighted sum), `percentile`, `median`, `outer`, `histogram`, `linspace`/`geomspace`, `log10`; arrays of shape (simulations, months); CSV snapshots; yfinance download.
 - **S7 and S9 pandas:** `resample("ME").last()`, `shift`, `dropna`, date filtering with boolean masks, `mean`, `cov`, `corr`, `rename`, `date_range`.
-- **S10 visualisation:** fan chart, histogram and heatmap in Plotly, with one y-axis, theme colours, legends, hover text and direct labels.
+- **S10 visualisation:** fan chart, histogram and heatmap in Plotly, with one y-axis, theme colours, legends, hover text and direct labels; a log scale for skewed outcomes.
 
 ## Limitations
 

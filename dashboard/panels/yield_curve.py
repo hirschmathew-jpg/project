@@ -739,6 +739,18 @@ def hex_to_rgba(hex_colour: str, alpha: float) -> str:
     return f"rgba({red}, {green}, {blue}, {alpha})"
 
 
+def top_margin_for_legend(legend_entries: int) -> int:
+    """Space (px) above the plot, with room for every row of the legend.
+
+    About two legend entries fit on one row at half-screen width (~500 px), so
+    the legend needs one row per two entries. Each extra row adds
+    LEGEND_ROW_HEIGHT, which keeps the legend below Plotly's toolbar (it
+    appears at the top right when the mouse is over the chart).
+    """
+    legend_rows = max(1, (legend_entries + 1) // 2)
+    return TOP_MARGIN + LEGEND_ROW_HEIGHT * (legend_rows - 1)
+
+
 def build_snapshot_chart(curves: dict[str, pd.Series], dates: dict[str, pd.Timestamp]) -> go.Figure:
     """Line + marker chart of the yield curve on each chosen date (x = maturity)."""
     fig = go.Figure()
@@ -760,11 +772,7 @@ def build_snapshot_chart(curves: dict[str, pd.Series], dates: dict[str, pd.Times
                      automargin=True)
     # Same number of decimals on every tick (3.5%, 4.0%, ...); automargin leaves room for the labels
     fig.update_yaxes(tickformat=".1f", ticksuffix="%", automargin=True)
-    # About two legend entries fit on one row at half-screen width (~500 px), so the
-    # legend needs one row per two curves. The top margin grows with it, which keeps
-    # the legend below Plotly's toolbar (shown at the top right on hover).
-    legend_rows = max(1, (len(curves) + 1) // 2)
-    fig.update_layout(showlegend=True, margin=dict(t=TOP_MARGIN + LEGEND_ROW_HEIGHT * (legend_rows - 1)))
+    fig.update_layout(showlegend=True, margin=dict(t=top_margin_for_legend(len(curves))))
     return fig
 
 
@@ -807,6 +815,7 @@ def build_spread_chart(spread_bp: pd.Series, spread_name: str,
         mode="lines", line=dict(color=theme.INK_SECONDARY, width=0),
         showlegend=False, hovertemplate="%{y:+.0f} bp",
     ))
+    legend_entries = 2  # normal and inverted
     visible_recessions = []
     if show_recessions and not spread_bp.empty:
         visible_recessions = recessions_in_window(recessions, spread_bp.index.min(), spread_bp.index.max())
@@ -817,9 +826,10 @@ def build_spread_chart(spread_bp: pd.Series, spread_name: str,
             x=[None], y=[None], name="US recession", mode="markers", hoverinfo="skip",
             marker=dict(symbol="square", size=13, color=theme.RECESSION_FILL),
         ))
+        legend_entries = 3
     fig.add_hline(y=0, line_color=theme.INK_MUTED, line_width=1)
     theme.style_figure(fig, y_title=f"{spread_name} spread (bp)")
-    fig.update_layout(margin=dict(t=TOP_MARGIN))
+    fig.update_layout(margin=dict(t=top_margin_for_legend(legend_entries)))
     if not spread_bp.empty:
         # Direct label for the latest value, in the right margin next to the last point.
         # x is in "paper" units (1 = right edge of the plot), so the label doesn't
@@ -899,7 +909,7 @@ def _show_kpis(yields: pd.DataFrame, spread_bp: pd.Series, spread_name: str,
     else:
         spread_delta = None
         if year_ago is not None and year_ago in spread_bp.index:
-            spread_delta = f"{spread_bp.iloc[-1] - spread_bp[year_ago]:+.0f} bp vs a year earlier"
+            spread_delta = f"{spread_bp.iloc[-1] - spread_bp[year_ago]:+.0f} bp vs 1y ago"
         col_spread.metric(
             f"{spread_name} spread", format_bp(spread_bp.iloc[-1]), spread_delta, delta_color="off",
             help=f"{long} yield minus {short} yield on {format_date(spread_bp.index[-1])}. "
@@ -912,7 +922,7 @@ def _show_kpis(yields: pd.DataFrame, spread_bp: pd.Series, spread_name: str,
     else:
         yield_delta = None
         if year_ago is not None and year_ago in ten_year.index:
-            yield_delta = f"{(ten_year.iloc[-1] - ten_year[year_ago]) * 100:+.0f} bp vs a year earlier"
+            yield_delta = f"{(ten_year.iloc[-1] - ten_year[year_ago]) * 100:+.0f} bp vs 1y ago"
         col_yield.metric(
             "10-year yield", f"{ten_year.iloc[-1]:.2f}%", yield_delta, delta_color="off",
             help=f"US 10-year Treasury yield (FRED DGS10) on {format_date(ten_year.index[-1])}.",
