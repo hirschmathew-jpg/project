@@ -423,6 +423,17 @@ def test_history_insight_averages_lead_times():
     assert "not followed" not in text  # every inversion was followed by a recession
 
 
+def test_history_insight_equal_lead_times_have_no_range():
+    # Two inversions, each 14 months before a recession: no odd "range 14-14 months"
+    parts = [make_spread([-10] * 12 + [20] * 80, start=start) for start in ("2000-02-01", "2006-11-01")]
+    later = make_spread([20] * 600, start="2007-06-01")
+    spread = pd.concat(parts + [later])
+    episodes = episodes_for(spread)
+    text = yc.history_insight(spread, episodes, "10Y - 2Y", 10)
+    assert "2 recessions began within 30 months of an inversion, each 14 months after the first warning" in text
+    assert "range" not in text
+
+
 def test_history_insight_without_any_episode():
     spread = make_spread([40, 30, 20, -5])
     text = yc.history_insight(spread, [], "10Y - 2Y", 10)
@@ -463,6 +474,20 @@ def test_snapshot_insight_mentions_the_most_inverted_curve_and_its_outcome():
     assert "most inverted on 3 Jul 2023 (Deepest inversion), at -110 bp" in text
     # The default view says honestly whether a recession followed
     assert "that inversion began on 1 Apr 2022 and was not followed by a recession within 30 months" in text
+
+
+def test_snapshot_insight_short_dip_is_not_called_a_recession_warning():
+    # A 3-day dip that the 10-day episode rule ignores (like 27 Aug 2019 for the 10Y - 2Y)
+    spread = make_spread([20] * 5 + [-4] * 3 + [20] * 100, start="2019-08-19")
+    episodes = episodes_for(spread)
+    assert episodes == []
+    latest = pd.Series({"3M": 4.3, "2Y": 4.8, "10Y": 5.2})
+    dip = pd.Series({"3M": 2.0, "2Y": 1.54, "10Y": 1.50})
+    dates = {yc.LATEST: pd.Timestamp("2026-10-13"), yc.CUSTOM: pd.Timestamp("2019-08-27")}
+    text = yc.snapshot_insight({yc.LATEST: latest, yc.CUSTOM: dip}, dates, "10Y - 2Y", episodes)
+    assert "most inverted on 27 Aug 2019 (Custom date), at -4 bp" in text
+    assert "classic recession warning" not in text
+    assert "too short to count as an inversion episode" in text
 
 
 def test_snapshot_insight_when_the_first_curve_is_the_lowest():
@@ -574,8 +599,10 @@ def test_snapshot_chart_makes_room_for_more_legend_rows():
     two = yc.build_snapshot_chart({yc.LATEST: curve, yc.YEAR_AGO: curve}, {yc.LATEST: date, yc.YEAR_AGO: date})
     names = yc.MOMENT_NAMES[:5]
     five = yc.build_snapshot_chart({name: curve for name in names}, {name: date for name in names})
-    assert two.layout.margin.t == yc.TOP_MARGIN
-    assert five.layout.margin.t == yc.TOP_MARGIN + 2 * yc.LEGEND_ROW_HEIGHT  # 3 legend rows
+    # The shared theme helper sizes the margin from the legend entries actually shown
+    assert two.layout.margin.t == theme.legend_top_margin(theme.legend_names(two))
+    assert five.layout.margin.t == theme.legend_top_margin(theme.legend_names(five))
+    assert five.layout.margin.t > two.layout.margin.t  # five long entries need more rows
     assert five.layout.yaxis.tickformat == ".1f"  # 3.5%, 4.0%, ... the same decimals on every tick
 
 
@@ -584,16 +611,20 @@ def test_spread_chart_makes_room_for_the_recession_legend_row():
     recessions = [(pd.Timestamp("2020-02-01"), pd.Timestamp("2020-03-01"))]
     with_bands = yc.build_spread_chart(spread, "10Y - 2Y", recessions, show_recessions=True)
     without_bands = yc.build_spread_chart(spread, "10Y - 2Y", recessions, show_recessions=False)
-    assert with_bands.layout.margin.t == yc.top_margin_for_legend(3) == yc.TOP_MARGIN + yc.LEGEND_ROW_HEIGHT
-    assert without_bands.layout.margin.t == yc.top_margin_for_legend(2) == yc.TOP_MARGIN
+    assert theme.legend_names(with_bands)[-1] == "US recession"
+    assert "US recession" not in theme.legend_names(without_bands)
+    assert with_bands.layout.margin.t == theme.legend_top_margin(theme.legend_names(with_bands))
+    assert without_bands.layout.margin.t == theme.legend_top_margin(theme.legend_names(without_bands))
+    assert with_bands.layout.margin.t == without_bands.layout.margin.t + theme.LEGEND_ROW_HEIGHT
 
 
-def test_recessions_in_window():
-    recessions = [(pd.Timestamp("2001-04-01"), pd.Timestamp("2001-12-01")),
-                  (pd.Timestamp("2008-01-01"), pd.Timestamp("2009-07-01"))]
-    found = yc.recessions_in_window(recessions, pd.Timestamp("2009-01-01"), pd.Timestamp("2015-01-01"))
-    assert found == [recessions[1]]
-    assert yc.recessions_in_window(recessions, pd.Timestamp("2015-01-01"), pd.Timestamp("2020-01-01")) == []
+def test_spread_chart_starting_the_month_a_recession_ends_has_no_band():
+    # The window starts on the recession's end date (the first month after it): nothing to shade
+    spread = make_spread([10, -5, 20], start="2020-05-01")
+    recessions = [(pd.Timestamp("2020-02-01"), pd.Timestamp("2020-05-01"))]
+    fig = yc.build_spread_chart(spread, "10Y - 2Y", recessions, show_recessions=True)
+    assert "US recession" not in theme.legend_names(fig)
+    assert [shape for shape in fig.layout.shapes if shape.type == "rect"] == []
 
 
 def test_last_n_years_and_weekly():
@@ -712,9 +743,17 @@ def expected_lead_kpi(yields: pd.DataFrame, spread_name: str, min_days: int, max
     return f"{summary['mean']:.0f} months"
 
 
-def test_app_default_view(app, real_yields):
+@pytest.fixture
+def snapshot_app(app):
+    """The panel switched to the 'Curve snapshots' view."""
+    app.radio(key="yield_curve_view").set_value(yc.SNAPSHOT_VIEW).run()
+    _check(app)
+    return app
+
+
+def check_kpis_by_hand(app, real_yields):
+    """The three KPIs, worked out by hand from the CSV (10Y - 2Y now and a year earlier)."""
     assert len(app.metric) == 3
-    # Work out the KPIs by hand from the CSV: 10Y - 2Y now, and a year earlier
     latest_day = real_yields.index[-1]
     year_ago = real_yields.index[real_yields.index <= latest_day - pd.DateOffset(years=1)][-1]
     spread_now = (real_yields.loc[latest_day, "10Y"] - real_yields.loc[latest_day, "2Y"]) * 100
@@ -729,13 +768,34 @@ def test_app_default_view(app, real_yields):
     assert app.metric[1].delta == f"{(ten_now - ten_then) * 100:+.0f} bp vs 1y ago"
     assert app.metric[2].value == expected_lead_kpi(real_yields, "10Y - 2Y", yc.MIN_DAYS_DEFAULT, yc.MAX_LEAD_DEFAULT)
 
+
+def test_app_default_view(app, real_yields):
+    # The panel opens on the spread history (an area chart, unlike Panel 1's line chart)
+    assert app.radio(key="yield_curve_view").value == yc.HISTORY_VIEW
+    assert yc.VIEWS[0] == yc.HISTORY_VIEW
+    check_kpis_by_hand(app, real_yields)
+
+    latest_day = real_yields.index[-1]
     insight = app.info[0].value
+    assert insight.startswith("The 10Y - 2Y spread is ")
+    assert yc.format_date(latest_day) in insight
+    # The second sentence gives the track record of past inversions
+    assert f"within {yc.MAX_LEAD_DEFAULT} months of an inversion" in insight
+
+
+def test_app_snapshot_view(snapshot_app, real_yields):
+    app = snapshot_app
+    check_kpis_by_hand(app, real_yields)  # the same KPIs in both views
+
+    insight = app.info[0].value
+    latest_day = real_yields.index[-1]
     assert insight.startswith(f"On {yc.format_date(latest_day)} (Latest) the curve was")
-    # The default view says whether a recession followed the deepest inversion
+    # The snapshot view says whether a recession followed the deepest inversion
     assert "Deepest inversion" in insight and "that inversion began on" in insight
 
 
-def test_app_snapshot_controls(app):
+def test_app_snapshot_controls(snapshot_app):
+    app = snapshot_app
     moments = app.multiselect(key="yield_curve_moments")
     for option in yc.NAMED_MOMENTS:
         moments.set_value([option]).run()
@@ -766,7 +826,8 @@ def test_app_snapshot_controls(app):
     assert len(app.metric) == 3
 
 
-def test_app_custom_date_on_the_same_day_as_latest(app, real_yields):
+def test_app_custom_date_on_the_same_day_as_latest(snapshot_app, real_yields):
+    app = snapshot_app
     latest_day = real_yields.index[-1].date()
     app.multiselect(key="yield_curve_moments").set_value([yc.LATEST]).run()
     app.toggle(key="yield_curve_use_custom").set_value(True).run()
@@ -814,7 +875,8 @@ def test_app_history_view_every_control(app, real_yields):
     _check(app)
 
 
-def test_app_switching_views_keeps_every_control(app):
+def test_app_switching_views_keeps_every_control(snapshot_app):
+    app = snapshot_app
     # Change the snapshot controls
     moments = [yc.LATEST, "Financial crisis (Dec 2008)"]
     app.multiselect(key="yield_curve_moments").set_value(moments).run()

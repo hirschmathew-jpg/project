@@ -31,7 +31,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dashboard import theme, ui
-from dashboard.data import filter_dates, load_prices, load_recessions, recession_periods
+from dashboard.data import filter_dates, load_prices, load_recessions, recession_periods, recessions_in_window
 
 NUMBER = 3
 SLUG = "sectors"
@@ -647,7 +647,7 @@ def add_value_labels(fig: go.Figure, names: list[str], values: list[float], labe
         else:
             anchor, shift = "right", -4  # negative bar: label to the left of its end
         fig.add_annotation(x=value, y=name, text=label, showarrow=False, xanchor=anchor, xshift=shift,
-                           bgcolor=theme.NEUTRAL, borderpad=1,
+                           bgcolor=theme.PLOT_BACKGROUND, borderpad=1,
                            font=dict(size=11, color=theme.INK_SECONDARY))
 
 
@@ -799,15 +799,12 @@ def build_growth_chart(growth: pd.DataFrame, highlight: str, recessions: list | 
         end_labels.append(highlight)
 
     start, end = growth.index[0], growth.index[-1]
-    if recessions:
-        overlapping = [(s, e) for s, e in recessions if s <= end and e >= start]
-        if overlapping:
-            theme.add_recession_bands(fig, overlapping, start, end)
-            fig.add_trace(go.Scatter(
-                x=[None], y=[None], name="US recession", mode="markers", hoverinfo="skip",
-                legendrank=3, marker=dict(symbol="square", size=12, color=theme.RECESSION_FILL,
-                                          line=dict(color=theme.AXIS, width=1)),
-            ))
+    if recessions is None:
+        recessions = []
+    visible_recessions = recessions_in_window(recessions, start, end)
+    if visible_recessions:  # legend entry only when a grey band is actually drawn
+        theme.add_recession_bands(fig, visible_recessions, start, end)
+        theme.add_recession_legend_entry(fig)
 
     fig.add_hline(y=100, line_width=1, line_color=theme.INK_MUTED)  # the starting $100
     add_end_labels(fig, growth, end_labels)
@@ -816,10 +813,11 @@ def build_growth_chart(growth: pd.DataFrame, highlight: str, recessions: list | 
     fig.update_xaxes(range=[start, end], hoverformat="%d %b %Y", automargin=True)
     fig.update_yaxes(tickprefix="$", tickformat=",.0f", automargin=True)
     # Legend under the chart: at the top it would sit under Plotly's toolbar,
-    # which covers it whenever the mouse is over the chart.
+    # which covers it whenever the mouse is over the chart. y=-0.15 leaves room
+    # for two lines of date labels (short periods add the year on a second line).
     # Right margin: room for the end labels ("XLK $245")
     fig.update_layout(margin=dict(r=72),
-                      legend=dict(orientation="h", y=-0.08, yanchor="top", x=0))
+                      legend=dict(orientation="h", y=-0.15, yanchor="top", x=0))
     return fig
 
 

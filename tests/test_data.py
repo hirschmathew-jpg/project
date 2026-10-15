@@ -102,6 +102,25 @@ def test_fetch_fred_uses_api_when_key_set(monkeypatch):
     assert len(df) == 1
 
 
+def test_fetch_prices_keeps_finished_days_only(monkeypatch):
+    """Yahoo's row for today is a price during trading, not a close, so it is dropped."""
+    import sys
+    import types
+
+    today = pd.Timestamp.now().normalize()
+    days = pd.DatetimeIndex([today - pd.Timedelta(days=2), today - pd.Timedelta(days=1), today])
+    columns = pd.MultiIndex.from_product([["Close", "Open"], ["SPY", "AGG"]])
+    raw = pd.DataFrame(1.0, index=days, columns=columns)
+
+    fake_yfinance = types.ModuleType("yfinance")
+    fake_yfinance.download = lambda *args, **kwargs: raw
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yfinance)
+
+    close = data.fetch_prices(["SPY", "AGG"])
+    assert list(close.columns) == ["SPY", "AGG"]
+    assert list(close.index) == list(days[:2])
+
+
 def test_recession_periods():
     index = pd.date_range("2020-01-01", periods=8, freq="MS")
     flag = pd.Series([0, 1, 1, 0, 0, 1, 1, 1], index=index)
@@ -116,11 +135,55 @@ def test_recession_periods_none():
     assert data.recession_periods(pd.Series([0, 0, 0, 0], index=index)) == []
 
 
+RECESSIONS = [(pd.Timestamp("2001-03-01"), pd.Timestamp("2001-12-01")),
+              (pd.Timestamp("2007-12-01"), pd.Timestamp("2009-07-01")),
+              (pd.Timestamp("2020-02-01"), pd.Timestamp("2020-05-01"))]
+
+
+def test_recessions_in_window():
+    window = data.recessions_in_window(RECESSIONS, pd.Timestamp("2009-01-01"), pd.Timestamp("2019-12-01"))
+    assert window == [RECESSIONS[1]]  # only the 2008-09 recession overlaps
+    both = data.recessions_in_window(RECESSIONS, "2001-06-01", "2008-06-01")  # strings work too
+    assert both == RECESSIONS[:2]
+    assert data.recessions_in_window(RECESSIONS, "2010-01-01", "2019-12-31") == []
+    assert data.recessions_in_window([], "2000-01-01", "2026-01-01") == []
+
+
+def test_recessions_touching_the_window_edge_are_left_out():
+    # They would only give a band of zero width (and a legend entry for nothing)
+    # COVID recession ends (2020-05-01) exactly where the window starts
+    assert data.recessions_in_window(RECESSIONS, "2020-05-01", "2021-12-31") == []
+    # 2001 recession starts exactly where the window ends
+    assert data.recessions_in_window(RECESSIONS, "1999-01-01", "2001-03-01") == []
+    # One day more on either side and the recession is in
+    assert data.recessions_in_window(RECESSIONS, "2020-04-30", "2021-12-31") == [RECESSIONS[2]]
+    assert data.recessions_in_window(RECESSIONS, "1999-01-01", "2001-03-02") == [RECESSIONS[0]]
+
+
 def test_filter_dates():
     df = sample_frame()
     assert len(data.filter_dates(df, "2024-02-01", None)) == 2
     assert len(data.filter_dates(df, None, "2024-01-31")) == 1
     assert len(data.filter_dates(df, "2024-01-01", "2024-03-01")) == 3
+
+
+def test_snapshot_end_dates(tmp_data_dir):
+    data.write_snapshot("demo", sample_frame())
+    # A forecast row far ahead with only one of three columns filled is ignored
+    index = pd.to_datetime(["2024-01-01", "2024-02-01", "2030-01-01"])
+    forecast = pd.DataFrame({"A": [1.0, 2.0, None], "B": [1.0, 2.0, None], "C": [5.0, 5.0, 4.5]}, index=index)
+    data.write_snapshot("with_forecast", forecast)
+    (tmp_data_dir / "empty.csv").write_text("date,A\n")
+    assert data.snapshot_end_dates() == {"demo": pd.Timestamp("2024-03-01"),
+                                         "with_forecast": pd.Timestamp("2024-02-01")}
+
+
+def test_every_shipped_snapshot_has_dates():
+    """Every CSV in data/ is a dated snapshot (no stray files)."""
+    end_dates = data.snapshot_end_dates()
+    csv_files = sorted(path.stem for path in data.DATA_DIR.glob("*.csv"))
+    assert sorted(end_dates) == csv_files
+    assert "recessions" in end_dates
 
 
 def test_recessions_snapshot_is_shipped():

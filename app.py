@@ -15,7 +15,7 @@ import logging
 
 import streamlit as st
 
-from dashboard.data import load_recessions
+from dashboard.data import load_recessions, snapshot_end_dates
 from dashboard.panels import PANELS
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,45 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# Streamlit always puts st.columns side by side (until the window is phone-sized).
+# Below about 1200 px the 2 x 2 grid gets too narrow for the panels' controls, so this
+# CSS stacks the four panels in one column instead. The open sidebar takes about 300 px,
+# so with the sidebar open the panels are stacked below 1550 px. (Newer Streamlit marks an
+# open sidebar with data-collapsed="false", version 1.40 with aria-expanded="true".)
+# The CSS only touches the grid rows, i.e. the rows that contain a panel marker
+# (see render_panel), not the rows of controls inside a panel.
+PAGE_CSS = """
+<style>
+@media (max-width: 1199px) {
+  div[data-testid="stHorizontalBlock"]:has(.dashboard-panel) {
+    flex-direction: column;
+  }
+  div[data-testid="stHorizontalBlock"]:has(.dashboard-panel) > div {
+    width: 100% !important;
+    min-width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+}
+@media (max-width: 1549px) {
+  body:has([data-testid="stSidebar"][data-collapsed="false"]) div[data-testid="stHorizontalBlock"]:has(.dashboard-panel),
+  body:has([data-testid="stSidebar"][aria-expanded="true"]) div[data-testid="stHorizontalBlock"]:has(.dashboard-panel) {
+    flex-direction: column;
+  }
+  body:has([data-testid="stSidebar"][data-collapsed="false"]) div[data-testid="stHorizontalBlock"]:has(.dashboard-panel) > div,
+  body:has([data-testid="stSidebar"][aria-expanded="true"]) div[data-testid="stHorizontalBlock"]:has(.dashboard-panel) > div {
+    width: 100% !important;
+    min-width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+}
+/* The marker itself takes no space */
+div[data-testid="stElementContainer"]:has(.dashboard-panel),
+div.element-container:has(.dashboard-panel) {
+  display: none;
+}
+</style>
+"""
 
 
 def refresh_all_data() -> list[str]:
@@ -42,6 +81,12 @@ def refresh_all_data() -> list[str]:
         errors.append(f"Recession dates: {exc}")
     st.cache_data.clear()
     return errors
+
+
+@st.cache_data(show_spinner=False)
+def cached_snapshot_dates() -> dict:
+    """Last date in each saved CSV in data/ (cached; cleared when the data is refreshed)."""
+    return snapshot_end_dates()
 
 
 def render_sidebar() -> None:
@@ -64,6 +109,20 @@ def render_sidebar() -> None:
             "works offline. Click below to download the latest numbers from FRED and "
             "Yahoo Finance."
         )
+        try:
+            end_dates = cached_snapshot_dates()
+        except Exception:  # unreadable files: the panels show their own messages
+            end_dates = {}
+        if end_dates:
+            lines = []
+            for name, last_date in end_dates.items():
+                if last_date.day == 1:  # monthly FRED data is dated the 1st: show "Sep 2026"
+                    when = f"{last_date:%b %Y}"
+                else:
+                    when = f"{last_date.day} {last_date:%b %Y}"
+                lines.append(f"`{name}.csv` · up to {when}")
+            st.caption("Saved data:  \n" + "  \n".join(lines))
+
         if st.button("Refresh data", key="refresh_data", icon="🔄"):
             with st.spinner("Downloading the latest data..."):
                 errors = refresh_all_data()
@@ -78,9 +137,25 @@ def render_sidebar() -> None:
         )
 
 
+def render_header() -> None:
+    """Title, the story in one sentence, and the four panel questions in reading order."""
+    st.title("Inflation, Interest Rates & Markets")
+    st.markdown(
+        "How did the inflation surge after 2021, and the Federal Reserve's response, play out "
+        "in bonds, stocks and portfolios? Each panel answers one question. Read them in order, "
+        "then change the controls to test the story."
+    )
+    questions = []
+    for panel in PANELS:
+        questions.append(f"**{panel.NUMBER}** {panel.QUESTION}")
+    st.markdown(" → ".join(questions))
+
+
 def render_panel(panel) -> None:
     """Draw one panel in a bordered card. If it fails, show an error but keep the rest of the dashboard running."""
     with st.container(border=True):
+        # Invisible marker that PAGE_CSS uses to find the grid rows
+        st.markdown('<span class="dashboard-panel"></span>', unsafe_allow_html=True)
         try:
             panel.render()
         except Exception as exc:
@@ -89,14 +164,11 @@ def render_panel(panel) -> None:
 
 
 def main() -> None:
+    st.markdown(PAGE_CSS, unsafe_allow_html=True)
     render_sidebar()
+    render_header()
 
-    st.title("Inflation, Interest Rates & Markets")
-    st.markdown(
-        "**1** Did the Fed keep up with inflation? → **2** What did the bond market expect? "
-        "→ **3** Which stocks won and lost? → **4** What could it mean for a portfolio?"
-    )
-
+    # Two rows of two panels: [1, 2] then [3, 4]
     for row_start in range(0, len(PANELS), 2):
         columns = st.columns(2, gap="medium")
         for column, panel in zip(columns, PANELS[row_start:row_start + 2]):
@@ -105,7 +177,8 @@ def main() -> None:
 
     st.caption(
         "MIS20080 Introduction to Programming · Group dashboard project · "
-        "Built with Python, pandas, NumPy, Plotly and Streamlit."
+        "Built with Python, pandas, NumPy, Plotly and Streamlit. "
+        "Open the sidebar (top left) for the team, the data sources and a data refresh button."
     )
 
 

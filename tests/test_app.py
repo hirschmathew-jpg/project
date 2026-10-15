@@ -28,6 +28,23 @@ def test_every_panel_is_shown():
         assert panel.TITLE in headings
 
 
+def test_header_lists_every_panel_question_in_order():
+    at = run_app()
+    headings = " ".join(md.value for md in at.markdown)
+    positions = [headings.index(panel.QUESTION) for panel in PANELS]
+    assert positions == sorted(positions)
+
+
+def test_sidebar_shows_the_team_the_data_dates_and_the_refresh_button():
+    at = run_app()
+    team = " ".join(md.value for md in at.sidebar.markdown)
+    for panel in PANELS:
+        assert panel.OWNER in team
+    captions = " ".join(caption.value for caption in at.sidebar.caption)
+    assert "recessions.csv" in captions and "up to" in captions
+    assert [button.label for button in at.sidebar.button] == ["Refresh data"]
+
+
 def test_panel_contract():
     for panel in PANELS:
         for attr in ("NUMBER", "SLUG", "TITLE", "OWNER", "QUESTION"):

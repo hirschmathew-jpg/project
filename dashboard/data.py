@@ -68,6 +68,24 @@ def write_snapshot(name: str, df: pd.DataFrame) -> Path:
     return path
 
 
+def snapshot_end_dates() -> dict[str, pd.Timestamp]:
+    """How recent every snapshot in data/ is, e.g. {"inflation_macro": Timestamp("2026-09-01"), ...}.
+
+    For each file this is the last date on which at least half of the columns
+    have a value. That skips rows that only hold forecasts (FRED's NROU series
+    contains CBO projections years ahead) or a trading day that had only just
+    started when the data was downloaded.
+    """
+    end_dates = {}
+    for path in sorted(DATA_DIR.glob("*.csv")):
+        df = read_snapshot(path.stem)
+        values_per_row = df.notna().sum(axis=1)
+        mostly_filled = df[values_per_row >= df.shape[1] / 2]
+        if not mostly_filled.empty:
+            end_dates[path.stem] = mostly_filled.index[-1]
+    return end_dates
+
+
 def load_dataset(name: str, fetch: Callable[[], pd.DataFrame], refresh: bool = False) -> pd.DataFrame:
     """Return dataset ``name`` from its snapshot, downloading it when needed.
 
@@ -170,6 +188,10 @@ def fetch_prices(tickers: Iterable[str], start: str = "2010-01-01") -> pd.DataFr
     close = close.reindex(columns=tickers)
     close.index = pd.DatetimeIndex(close.index).tz_localize(None)
     close.index.name = "date"
+    # Leave out today: while markets are open, today's "close" is only the latest
+    # price and changes during the day, so the snapshot keeps finished days only
+    today = pd.Timestamp.now().normalize()
+    close = close[close.index < today]
     return close.dropna(how="all")
 
 
@@ -211,6 +233,25 @@ def recession_periods(flag: pd.Series) -> list[tuple[pd.Timestamp, pd.Timestamp]
     if start is not None:  # recession still going at the end of the data
         periods.append((start, flag.index[-1] + pd.offsets.MonthBegin(1)))
     return periods
+
+
+def recessions_in_window(periods: list[tuple[pd.Timestamp, pd.Timestamp]],
+                         start, end) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """The (start, end) recession periods that overlap a chart window ``start``..``end``.
+
+    The test uses strict < and >, so a recession that only touches the edge of
+    the window is left out. Example: the COVID recession runs from 2020-02-01
+    to 2020-05-01 (the first month after it). A chart starting on 2020-05-01
+    would only get a band of zero width, plus a "US recession" legend entry
+    pointing at nothing.
+    """
+    window_start = pd.Timestamp(start)
+    window_end = pd.Timestamp(end)
+    visible = []
+    for recession_start, recession_end in periods:
+        if recession_start < window_end and recession_end > window_start:
+            visible.append((recession_start, recession_end))
+    return visible
 
 
 def filter_dates(df: pd.DataFrame | pd.Series, start=None, end=None):

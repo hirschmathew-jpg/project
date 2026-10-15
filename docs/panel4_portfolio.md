@@ -82,7 +82,7 @@ KPIs: median value after N years, chance of a loss, and the 5% worst case. The d
 - **S5 functions:** short functions with docstrings and type hints; pure model functions separate from the Streamlit `render()`.
 - **S6 NumPy, CSV, yfinance:** `default_rng`, `multivariate_normal`, `exp`, `@` (weighted sum), `percentile`, `median`, `outer`, `histogram`, `linspace`/`geomspace`, `log10`; arrays of shape (simulations, months); CSV snapshots; yfinance download.
 - **S7 and S9 pandas:** `resample("ME").last()`, `shift`, `dropna`, date filtering with boolean masks, `mean`, `cov`, `corr`, `rename`, `date_range`.
-- **S10 visualisation:** fan chart, histogram and heatmap in Plotly, with one y-axis, theme colours, legends, hover text and direct labels; a log scale for skewed outcomes.
+- **S10 visualisation:** fan chart, histogram and heatmap (the last two are S10 chart types) in Plotly rather than Matplotlib/Seaborn, so they have hover and zoom in the web dashboard (see "Why Plotly" in the README), with one y-axis, theme colours, legends, hover text and direct labels; a log scale for skewed outcomes.
 
 ## Limitations
 

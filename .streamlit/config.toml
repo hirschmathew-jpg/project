@@ -1,9 +1,14 @@
 [theme]
 base = "light"
 primaryColor = "#2a78d6"
-backgroundColor = "#f9f9f7"
+backgroundColor = "#f9f9f7"            # keep equal to PAGE_BACKGROUND in dashboard/theme.py
 secondaryBackgroundColor = "#f0efec"
 textColor = "#0b0b0b"
+
+[client]
+# Hide the "Deploy" button and the developer menu items, so the dashboard looks
+# finished. Streamlit still offers "Rerun" when you save a file.
+toolbarMode = "viewer"
 
 [browser]
 gatherUsageStats = false

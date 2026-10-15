@@ -443,6 +443,17 @@ def test_growth_chart_shades_overlapping_recessions_only():
     assert "US recession" not in [trace.name for trace in unshaded.data]
 
 
+def test_growth_chart_starting_the_month_a_recession_ends_has_no_band():
+    # Regression test: a Custom period from 1 May 2020 (the COVID recession's end
+    # month) used to get a zero-width band and a "US recession" legend entry
+    growth = sectors.growth_of_100(prices_from_returns({BENCH: [0.01] * 30, "XLK": [0.0] * 30}, start="2020-05-01"))
+    assert growth.index[0] == pd.Timestamp("2020-05-01")
+    covid = [(pd.Timestamp("2020-02-01"), pd.Timestamp("2020-05-01"))]
+    fig = sectors.build_growth_chart(growth, "XLK", covid)
+    assert theme.legend_names(fig) == ["S&P 500 (SPY)", "Technology (XLK)"]
+    assert [shape for shape in fig.layout.shapes if shape.type == "rect"] == []
+
+
 # ---------------------------------------------------------------------------
 # The snapshot shipped in data/
 # ---------------------------------------------------------------------------

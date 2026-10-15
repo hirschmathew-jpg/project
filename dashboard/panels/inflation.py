@@ -24,7 +24,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dashboard import theme, ui
-from dashboard.data import filter_dates, load_fred, load_recessions, recession_periods
+from dashboard.data import filter_dates, load_fred, load_recessions, recession_periods, recessions_in_window
 
 NUMBER = 1
 SLUG = "inflation"
@@ -427,19 +427,6 @@ def add_gap_marker(fig: go.Figure, table: pd.DataFrame, month: pd.Timestamp, gap
     )
 
 
-def recessions_in_window(recessions: list, start: pd.Timestamp, end: pd.Timestamp) -> list:
-    """The (start, end) recession periods that overlap the chart window start..end.
-
-    Strict < and > so a recession that only touches the edge of the window
-    (which would be a band of zero width) is left out.
-    """
-    visible = []
-    for recession_start, recession_end in recessions:
-        if recession_start < end and recession_end > start:
-            visible.append((recession_start, recession_end))
-    return visible
-
-
 def y_axis_range(lines: list[pd.Series], room_above: bool, room_below: bool) -> list[float]:
     """Y-axis range that fits every line, plus extra empty space for a label above or below."""
     values = pd.concat(lines).dropna()
@@ -485,14 +472,9 @@ def build_chart(table: pd.DataFrame, measure: str, preset: str, show_inflation: 
 
     start, end = table.index[0], table.index[-1]
     visible_recessions = recessions_in_window(recessions, start, end)
-    if visible_recessions:
+    if visible_recessions:  # legend entry only when a grey band is actually drawn
         theme.add_recession_bands(fig, visible_recessions, start, end)
-        # Empty trace so the grey bands get a legend entry (only when a band is drawn)
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None], name="US recession", mode="markers", hoverinfo="skip",
-            marker=dict(symbol="square", size=12, color=theme.RECESSION_FILL,
-                        line=dict(color=theme.AXIS, width=1)),
-        ))
+        theme.add_recession_legend_entry(fig)
 
     fig.add_hline(y=0, line_width=1, line_color=theme.INK_MUTED)  # hairline at 0%
 
@@ -509,7 +491,9 @@ def build_chart(table: pd.DataFrame, measure: str, preset: str, show_inflation: 
     # automargin makes room for the tick labels so they aren't cut off
     fig.update_xaxes(range=[start, end], hoverformat="%b %Y", automargin=True)
     fig.update_yaxes(ticksuffix="%", automargin=True, range=y_range)
-    fig.update_layout(legend=dict(traceorder="normal"), margin=dict(t=44))
+    # Top margin: room for every legend row below Plotly's toolbar
+    fig.update_layout(legend=dict(traceorder="normal"),
+                      margin=dict(t=theme.legend_top_margin(theme.legend_names(fig))))
     return fig
 
 

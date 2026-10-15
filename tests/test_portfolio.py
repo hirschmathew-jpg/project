@@ -333,6 +333,9 @@ def test_format_helpers():
     assert portfolio.format_money_short(1_500_000) == "$1.5M"
     assert portfolio.format_money_short(2e9) == "$2B"            # not d3's "$2G"
     assert portfolio.format_money_short(1e12) == "$1T"
+    # Huge bitcoin outcomes: still money notation, never scientific ('$1e+06T')
+    assert portfolio.format_money_short(1e16) == "$10,000T"
+    assert "e+" not in portfolio.format_money_short(1e18)
     assert portfolio.format_change(28_591, 10_000) == "+186% vs start"
     assert portfolio.format_change(8_207, 10_000) == "-18% vs start"
     assert portfolio.format_change(245_973, 10_000) == "×25 vs start"  # not "+2360% vs start"

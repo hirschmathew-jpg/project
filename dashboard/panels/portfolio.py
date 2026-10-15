@@ -405,7 +405,11 @@ def format_money(value: float) -> str:
 
 
 def format_money_short(value: float) -> str:
-    """Short axis label for a round amount: $500, $20k, $1.5M, $2B, $1T."""
+    """Short axis label for a round amount: $500, $20k, $1.5M, $2B, $1T, $10,000T."""
+    if abs(value) >= 1e15:
+        # Beyond $1,000T keep counting in trillions with commas: ':g' below would
+        # switch to scientific notation ('$1e+06T') for such huge numbers
+        return f"${value / 1e12:,.0f}T"
     sizes = [(1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "k")]
     for size, letter in sizes:
         if abs(value) >= size:
@@ -655,7 +659,8 @@ def build_fan_chart(paths: pd.DataFrame, start_value: float, log_scale: bool = F
     fig.update_xaxes(range=[dates[0], dates[-1]], hoverformat="%b %Y", automargin=True)
     lowest = min(float(paths["p5"].min()), start_value)
     style_money_axis(fig, "y", lowest, float(paths["p95"].max()), log_scale)
-    fig.update_layout(margin=dict(t=44))
+    # Top margin: room for every legend row below Plotly's toolbar
+    fig.update_layout(margin=dict(t=theme.legend_top_margin(theme.legend_names(fig))))
     return fig
 
 

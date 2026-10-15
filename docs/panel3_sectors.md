@@ -94,7 +94,7 @@ All settings for a measure live in one dictionary, `METRICS`: its unit, whether 
 - **S6 NumPy, CSV, yfinance:** `np.sqrt`, `np.nan`; CSV snapshot in `data/`; Yahoo Finance download through yfinance.
 - **S7 pandas:** DataFrames, `.loc`/`.iloc`, boolean filtering, `std`, `mean`, `min`, `sort_values`, `dropna`.
 - **S9 time series:** `pct_change`, `cummax`, `cov`/`var`, `ffill` for missing prices, `pd.DateOffset`, `to_period("W")` with `groupby`.
-- **S10 visualisation:** Plotly bar and line charts on a single axis, diverging and emphasis colours, a reference line, annotations, hover text and recession shading.
+- **S10 visualisation:** bar and line charts on a single axis, diverging and emphasis colours, a reference line, annotations, hover text and recession shading. Drawn with Plotly instead of Matplotlib so they have hover and zoom in the web dashboard (see "Why Plotly" in the README).
 
 ## Limitations
 

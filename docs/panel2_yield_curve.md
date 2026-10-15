@@ -37,7 +37,7 @@ The panel links Panel 1 (what the Fed did with rates) to Panels 3-4 (what market
 
 | Control | Key | Effect |
 |---|---|---|
-| View | `yield_curve_view` | *Curve snapshots* (line + markers by maturity) or *Spread history* (area chart). |
+| View | `yield_curve_view` | *Spread history* (area chart, shown first because it answers the question directly) or *Curve snapshots* (line + markers by maturity). |
 | Spread | `yield_curve_spread` | 10Y − 2Y (most quoted) or 10Y − 3M (the New York Fed's choice). Drives the KPIs, the episodes, the insight and "Deepest inversion". |
 | Compare the curve on | `yield_curve_moments` | Up to 4 moments: Latest, 1 year ago, Deepest inversion (the day the spread was lowest), Pre-COVID, Financial crisis, Dot-com peak. Each has a fixed colour. |
 | Add a custom date + Custom date | `yield_curve_use_custom`, `yield_curve_custom_date` | Adds a fifth curve for any date since 1990. |
@@ -68,11 +68,11 @@ The two sliders set the episode rule. They change the episode table, the insight
 | `add_lead_times` | Adds the next recession, lead time, outcome and "first warning" flag to every episode dict. It keeps a list of the recessions already warned about. |
 | `summarise_lead_times` | Counts the outcomes with a dict, plus the mean, min and max lead with NumPy (first warnings only). |
 | `moment_dates`, `drop_same_day_moments` | Turn the chosen moment names into real trading days (if/elif chain), then keep one moment per day. |
-| `last_n_years`, `to_weekly`, `recessions_in_window` | Window the data, thin it to weekly, and keep the recessions that overlap. |
+| `last_n_years`, `to_weekly` | Window the data and thin it to weekly. The recessions that overlap the window come from the shared `recessions_in_window` in `dashboard/data.py`. |
 | `snapshot_insight` (+ `comparison_sentence`, `inversion_outcome_clause`) | The snapshot insight: the first curve's shape, how it compares (handling ties and all-inverted curves), and whether a recession followed the most inverted curve shown. |
 | `history_insight` (= `current_state_sentence` + `track_record_sentence`) | The history insight: where the spread is now and what followed the last episode, then the track record since 1990 (recessions, average lead, false alarms). |
 | `outcome_text`, `lead_kpi_help`, `episodes_markdown`, `plural`, `was_or_were`, `list_months` | Small text helpers, so the wording is correct for 1 or many and never hard-codes facts. |
-| `split_by_sign`, `build_snapshot_chart`, `build_spread_chart`, `top_margin_for_legend` | Plotly figures. `split_by_sign` makes the blue (normal) and red (inverted) areas meet at zero. `top_margin_for_legend` leaves one legend row per two entries, so the legend never sits under Plotly's toolbar. A single y-axis only, with colours from `dashboard/theme.py`. |
+| `split_by_sign`, `build_snapshot_chart`, `build_spread_chart` | Plotly figures. `split_by_sign` makes the blue (normal) and red (inverted) areas meet at zero. The shared `theme.legend_top_margin` leaves room for every legend row, so the legend never sits under Plotly's toolbar, and `theme.add_recession_legend_entry` gives the grey bands their legend entry. A single y-axis only, with colours from `dashboard/theme.py`. |
 | `render` (+ `_remember_control_values`, `_render_snapshots`, `_render_history`, `_show_kpis`) | The only Streamlit code: controls → 3 KPIs → chart → insight → details. |
 
 ## Course concepts used
@@ -85,7 +85,7 @@ The two sliders set the episode rule. They change the episode table, the insight
 | S6 | NumPy, FRED, CSV snapshots | Boolean arrays, `.sum()`, `np.mean`; FRED data saved as CSV snapshots. |
 | S7 | pandas | DataFrames, `.loc`/`.iloc`, boolean filtering, `dropna`, `idxmin`. |
 | S9 | Time series | `DateOffset`, `shift`, `clip`/`where`, `groupby(pd.Grouper(freq="W-FRI"))`. |
-| S10 | Visualisation | Line, marker and area charts, a categorical axis, recession bands, hover templates. |
+| S10 | Visualisation | Line, marker and area charts, a categorical axis, recession bands, hover templates. Drawn with Plotly instead of Matplotlib so they have hover and zoom in the web dashboard (see "Why Plotly" in the README). |
 | Testing | pytest + AppTest | Robustness and accuracy (learning outcome 5). |
 
 ## Limitations

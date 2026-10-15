@@ -71,7 +71,7 @@ The insight sentence is built from the current data. It gives the latest gap, pl
 | `latest_value`, `change_over_year`, `largest_gaps`, `missing_months` | Small analysis helpers that return `None` when there is nothing to report (`largest_gaps(..., min_gap=0.25)` ignores tiny gaps) |
 | `describe_latest_gap`, `describe_extremes`, `write_insight` | Build the insight sentences with if/elif branches for each case |
 | `pick_highlight`, `make_display_table` | Month to mark on the chart (the bigger of the two extremes); table for the "View the data" expander |
-| `recessions_in_window`, `y_axis_range`, `add_gap_marker`, `build_chart` | The Plotly figure: three lines on one % axis, recession bands (only those inside the window), 0% hairline, gap label |
+| `y_axis_range`, `add_gap_marker`, `build_chart` | The Plotly figure: three lines on one % axis, recession bands (only those inside the window, picked by the shared `recessions_in_window` in `dashboard/data.py`), 0% hairline, gap label |
 | `_draw_controls`, `_draw_kpis`, `render` | Streamlit layout. Presets and sliders are kept in sync with `st.session_state` and `on_change` callbacks |
 
 ## Course concepts used
@@ -81,7 +81,7 @@ The insight sentence is built from the current data. It gives the latest gap, pl
 - **S5 functions:** short functions with docstrings and type hints; `**params` (kwargs) unpacks a preset into `taylor_rule`; refactoring into pure functions plus a thin `render()`.
 - **S6 NumPy / CSV / FRED:** `np.maximum` for the zero floor; CSV snapshots; FRED download.
 - **S7 and S9 pandas:** DataFrames, `.loc` and boolean filtering, `pct_change`, `ffill`, `asfreq`, `idxmin`/`idxmax`, `dropna`, date indexes.
-- **S10 visualisation:** Plotly line chart with a single axis, consistent colours, a legend, hover text and annotations.
+- **S10 visualisation:** the line chart from S10, drawn with Plotly instead of Matplotlib so it has hover and zoom in the web dashboard (see "Why Plotly" in the README): a single axis, consistent colours, a legend, hover text and annotations.
 
 ## Limitations
 

@@ -1,7 +1,9 @@
-streamlit>=1.40
-plotly>=5.20
-pandas>=2.2
-numpy>=1.26
-requests>=2.31
-yfinance>=0.2.50
-pytest>=8.0
+# Lower bound = oldest version tested, upper bound = next major release (not tested yet),
+# so a new major version released between hand-in and marking can't break the dashboard.
+streamlit>=1.40,<2
+plotly>=5.20,<8
+pandas>=2.2,<4
+numpy>=1.26,<3
+requests>=2.31,<3
+yfinance>=0.2.50,<2
+pytest>=8.0,<10

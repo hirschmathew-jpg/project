@@ -326,16 +326,6 @@ def test_chart_colours_are_fixed_per_series():
     assert "yaxis2" not in without.layout.to_plotly_json()
 
 
-def test_recessions_in_window():
-    recessions = [(pd.Timestamp("2001-03-01"), pd.Timestamp("2001-12-01")),
-                  (pd.Timestamp("2007-12-01"), pd.Timestamp("2009-07-01")),
-                  (pd.Timestamp("2020-02-01"), pd.Timestamp("2020-05-01"))]
-    window = inflation.recessions_in_window(recessions, pd.Timestamp("2009-01-01"), pd.Timestamp("2019-12-01"))
-    assert window == [recessions[1]]  # only the 2008-09 recession overlaps
-    # A recession that ends exactly where the window starts doesn't overlap (zero-width band)
-    assert inflation.recessions_in_window(recessions, pd.Timestamp("2009-07-01"), pd.Timestamp("2019-12-01")) == []
-
-
 def test_no_recession_legend_without_a_recession_band():
     # Regression test: 'US recession' must not be in the legend when no band is drawn
     table = inflation.build_model_table(synthetic_data(24), "Core PCE", TAYLOR_1993)  # 2023-2024

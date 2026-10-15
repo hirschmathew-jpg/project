@@ -8,13 +8,19 @@ Set the FRED_API_KEY environment variable to use the official FRED API.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Importing the panels outside a running app makes Streamlit warn "No runtime found"
+# once per @st.cache_data function. That is harmless here, so hide those warnings.
+logging.disable(logging.WARNING)
 from dashboard.data import load_recessions  # noqa: E402
 from dashboard.panels import PANELS  # noqa: E402
+
+logging.disable(logging.NOTSET)
 
 
 def main() -> int:
